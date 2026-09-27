@@ -29,6 +29,7 @@ from app.routers.performance import router as performance_router
 from app.routers.recruitment import router as recruitment_router
 from app.routers.self_service import router as self_service_router
 from app.services.auth_service import AuthService
+from app.routers.overtime import router as overtime_router
 
 settings = get_settings()
 
@@ -108,6 +109,7 @@ app.include_router(notifications_router, prefix="/api/notifications", tags=["not
 app.include_router(ai_router, prefix="/api/ai", tags=["ai"])
 app.include_router(analytics_router, prefix="/api/analytics", tags=["analytics"])
 app.include_router(self_service_router, prefix="/api/self-service", tags=["employee-self-service"])
+app.include_router(overtime_router, prefix="/api/overtime", tags=["overtime"])
 
 
 @app.get("/api/health")

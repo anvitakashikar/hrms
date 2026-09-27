@@ -454,3 +454,207 @@ def decide_insurance_claim(claim_id: str, payload: Dict[str, Any], current_user:
     notify_user(org_id, claim["user_id"], f"insurance.claim.{decision}", f"Insurance claim {decision}", f"Your insurance claim was {decision}.", "insurance_claim", claim_id)
     store.add_audit_log(current_user["id"], org_id, f"insurance.claim.{decision}", {"record_id": claim_id})
     return updated
+# ---------------------------------------------------------------------------
+# Employee Benefits
+# ---------------------------------------------------------------------------
+
+@router.get("/benefits")
+def list_benefits(
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> List[Dict[str, Any]]:
+    org_id = _org_id(current_user)
+
+    benefits = store.list_module_records("employee_benefits", org_id)
+
+    if current_user.get("role") not in HR_ROLES:
+        benefits = [
+            benefit
+            for benefit in benefits
+            if benefit.get("user_id") == current_user["id"]
+        ]
+
+    return benefits
+
+
+@router.post("/benefits", status_code=status.HTTP_201_CREATED)
+def create_benefit(
+    payload: Dict[str, Any],
+    current_user: Dict[str, Any] = Depends(require_roles(*HR_ROLES)),
+) -> Dict[str, Any]:
+    org_id = _org_id(current_user)
+
+    name = str(payload.get("name", "")).strip()
+
+    if not name:
+        raise HTTPException(
+            status_code=422,
+            detail="Benefit name is required",
+        )
+
+    benefit_type = str(
+        payload.get("benefit_type", payload.get("type", "other"))
+    ).strip()
+
+    provider = str(
+        payload.get("provider", "")
+    ).strip()
+
+    description = str(
+        payload.get("description", "")
+    ).strip()
+
+    try:
+        amount = float(payload.get("amount", 0))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail="Benefit amount must be numeric",
+        ) from exc
+
+    if amount < 0:
+        raise HTTPException(
+            status_code=422,
+            detail="Benefit amount cannot be negative",
+        )
+
+    frequency = str(
+        payload.get("frequency", "monthly")
+    ).strip()
+
+    benefit = store.create_module_record(
+        "employee_benefits",
+        {
+            "org_id": org_id,
+            "name": name,
+            "benefit_type": benefit_type,
+            "provider": provider,
+            "description": description,
+            "amount": amount,
+            "frequency": frequency,
+            "active": bool(payload.get("active", True)),
+            "created_by": current_user["id"],
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+
+    store.add_audit_log(
+        current_user["id"],
+        org_id,
+        "benefits.created",
+        {
+            "record_id": benefit["id"],
+            "name": name,
+        },
+    )
+
+    return benefit
+# ---------------------------------------------------------------------------
+# Employee Benefits
+# ---------------------------------------------------------------------------
+
+@router.get("/benefits")
+def list_benefits(
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> List[Dict[str, Any]]:
+    org_id = _org_id(current_user)
+
+    benefits = store.list_module_records(
+        "employee_benefits",
+        org_id,
+    )
+
+    # Employees only see benefits assigned to them.
+    # HR/Admin can see all organization benefits.
+    if current_user.get("role") not in HR_ROLES:
+        benefits = [
+            benefit
+            for benefit in benefits
+            if benefit.get("user_id") == current_user["id"]
+        ]
+
+    return benefits
+
+
+@router.post("/benefits", status_code=status.HTTP_201_CREATED)
+def create_benefit(
+    payload: Dict[str, Any],
+    current_user: Dict[str, Any] = Depends(
+        require_roles(*HR_ROLES)
+    ),
+) -> Dict[str, Any]:
+    org_id = _org_id(current_user)
+
+    name = str(payload.get("name", "")).strip()
+
+    if not name:
+        raise HTTPException(
+            status_code=422,
+            detail="Benefit name is required",
+        )
+
+    benefit_type = str(
+        payload.get(
+            "benefit_type",
+            payload.get("type", "other"),
+        )
+    ).strip()
+
+    provider = str(
+        payload.get("provider", "")
+    ).strip()
+
+    description = str(
+        payload.get("description", "")
+    ).strip()
+
+    try:
+        amount = float(
+            payload.get("amount", 0)
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail="Benefit amount must be numeric",
+        ) from exc
+
+    if amount < 0:
+        raise HTTPException(
+            status_code=422,
+            detail="Benefit amount cannot be negative",
+        )
+
+    frequency = str(
+        payload.get("frequency", "monthly")
+    ).strip()
+
+    benefit = store.create_module_record(
+        "employee_benefits",
+        {
+            "org_id": org_id,
+            "name": name,
+            "benefit_type": benefit_type,
+            "provider": provider,
+            "description": description,
+            "amount": amount,
+            "frequency": frequency,
+            "active": bool(
+                payload.get("active", True)
+            ),
+            "created_by": current_user["id"],
+            "created_at": datetime.now(
+                timezone.utc
+            ).isoformat(),
+        },
+    )
+
+    store.add_audit_log(
+        current_user["id"],
+        org_id,
+        "benefits.created",
+        {
+            "record_id": benefit["id"],
+            "name": name,
+        },
+    )
+
+    return benefit
