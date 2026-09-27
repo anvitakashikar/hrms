@@ -133,7 +133,7 @@ export default function Dashboard({
           apiFetch<DashboardData>('/dashboard/summary'),
           apiFetch<Holiday[]>('/holidays'),
           apiFetch<Announcement[]>('/announcements'),
-          apiFetch<LeaveRecord[]>('/leave.applications'),
+          apiFetch<LeaveRecord[]>('/leave/applications'),
           apiFetch<ExpenseRecord[]>('/expenses/claim'),
         ])
 

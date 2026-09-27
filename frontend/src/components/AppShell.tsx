@@ -1,5 +1,11 @@
-import { useMemo } from 'react'
-import { NavLink, Route, Routes, useNavigate } from 'react-router-dom'
+import { useEffect, useMemo } from 'react'
+import {
+  NavLink,
+  Route,
+  Routes,
+  useLocation,
+  useNavigate,
+} from 'react-router-dom'
 
 import Dashboard from '../pages/Dashboard'
 import EmployeesPage from '../pages/EmployeesPage'
@@ -28,13 +34,25 @@ import type { UserSummary } from '../types'
 interface AppShellProps {
   user: UserSummary | null
   onLogout: () => void
+  initialRoute?: string
 }
 
 export default function AppShell({
   user,
   onLogout,
+  initialRoute = '/',
 }: AppShellProps) {
   const navigate = useNavigate()
+  const location = useLocation()
+
+  useEffect(() => {
+    if (
+      initialRoute &&
+      location.pathname === '/'
+    ) {
+      navigate(initialRoute, { replace: true })
+    }
+  }, [initialRoute, location.pathname, navigate])
 
   const navGroups = useMemo(
     () => [
@@ -90,9 +108,6 @@ export default function AppShell({
             label: 'Notifications',
             to: '/notifications',
             icon: '●',
-          },
-          {
-            
           },
         ],
       },
@@ -212,18 +227,19 @@ export default function AppShell({
           />
 
           <Route
-  path="/leave"
-  element={<LeavePage user={user} />}
-/>
-<Route
-  path="/expenses"
-  element={<ExpensesPage user={user} />}
-/>
+            path="/leave"
+            element={<LeavePage user={user} />}
+          />
 
-<Route
-  path="/holidays"
-  element={<HolidayPage user={user} />}
-/>
+          <Route
+            path="/expenses"
+            element={<ExpensesPage user={user} />}
+          />
+
+          <Route
+            path="/holidays"
+            element={<HolidayPage user={user} />}
+          />
 
           <Route
             path="/payroll"
@@ -278,11 +294,6 @@ export default function AppShell({
           <Route
             path="/benefits"
             element={<BenefitsPage user={user} />}
-          />
-
-          <Route
-            path="/holidays"
-            element={<HolidayPage user={user} />}
           />
 
           <Route
