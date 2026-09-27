@@ -231,7 +231,7 @@ function AppShell({ user, onLogout }: { user: UserSummary | null; onLogout: () =
           <Route path="/benefits" element={<BenefitsPage user={user} />} />
           <Route path="/holidays" element={<HolidayPage user={user} />} />
           <Route path="/policies" element={<PolicyPage user={user} />} />
-          <Route path="/notifications" element={<NotificationsPage />} />
+          <Route path="/notifications" element={<NotificationsPage user={user} />} />
           <Route path="/recruitment" element={<RecruitmentPage user={user} />} />
           <Route path="/performance" element={<PerformancePage user={user} />} />
           <Route path="/ai" element={<AiAssistantPage />} />
@@ -519,7 +519,7 @@ interface NotificationItem {
   read_at?: string | null
 }
 
-function NotificationsPage() {
+function NotificationsPage({ user }: { user: UserSummary | null }) {
   const [items, setItems] = useState<NotificationItem[]>([])
   const [message, setMessage] = useState('')
   const load = async () => setItems(await apiFetch<NotificationItem[]>('/notifications'))
@@ -530,8 +530,14 @@ function NotificationsPage() {
     await apiFetch(`/notifications/${id}/read`, { method: 'PATCH' })
     await load()
   }
+  const runReminders = async () => {
+    const result = await apiFetch<{ created_count: number }>('/notifications/reminders/run', { method: 'POST' })
+    setMessage(`${result.created_count} reminder(s) created`)
+    await load()
+  }
+  const canRunReminders = user?.role === 'admin' || user?.role === 'hr'
   return <section className="panel">
-    <div className="panel-header"><div><p className="eyebrow">Updates</p><h3>Notifications</h3></div><span className="muted">{items.filter((item) => !item.read_at).length} unread</span></div>
+    <div className="panel-header"><div><p className="eyebrow">Updates</p><h3>Notifications</h3></div><div className="row-actions"><span className="muted">{items.filter((item) => !item.read_at).length} unread</span>{canRunReminders && <button className="secondary-btn" type="button" onClick={() => runReminders().catch((error) => setMessage(error.message))}>Run reminders</button>}</div></div>
     {message && <p className="inline-message" role="status">{message}</p>}
     <ul className="notification-list">{items.map((item) => <li key={item.id} className={item.read_at ? 'read' : ''}>
       <div><strong>{item.title}</strong><p>{item.message}</p><small>{new Date(item.created_at).toLocaleString()}</small></div>
@@ -1098,6 +1104,7 @@ interface PolicyEntry {
   id: string
   name: string
   process: string
+  version: number
   description: string
   active: boolean
   rules?: { id: string; key: string; value: unknown }[]
@@ -1113,6 +1120,7 @@ function PolicyPage({ user }: { user: UserSummary | null }) {
   const [ruleKey, setRuleKey] = useState('')
   const [ruleValue, setRuleValue] = useState('')
   const [message, setMessage] = useState('')
+  const [versions, setVersions] = useState<{ id: string; version: number; snapshot: PolicyEntry; changed_at: string }[]>([])
   const canManage = user?.role === 'admin' || user?.role === 'hr'
   const load = async () => setPolicies(await apiFetch<PolicyEntry[]>(canManage ? '/policies' : '/policies/applicable'))
   useEffect(() => { load().catch((error) => setMessage(error.message)) }, [user?.role])
@@ -1148,6 +1156,11 @@ function PolicyPage({ user }: { user: UserSummary | null }) {
     setMessage('Policy assignment saved')
   }
 
+  const loadVersions = async (policy: PolicyEntry) => {
+    setSelectedPolicy(policy.id)
+    setVersions(await apiFetch<{ id: string; version: number; snapshot: PolicyEntry; changed_at: string }[]>(`/policies/${policy.id}/versions`))
+  }
+
   return <div className="module-stack">
     <section className="panel">
       <div className="panel-header"><div><p className="eyebrow">Configurable rules</p><h3>HR Policies</h3></div></div>
@@ -1160,7 +1173,7 @@ function PolicyPage({ user }: { user: UserSummary | null }) {
         <button className="primary-btn" type="submit">Create policy</button>
       </form>}
       <div className="table-scroll"><table className="table"><thead><tr><th>Policy</th><th>Process</th><th>Rules</th><th>Status</th>{canManage && <th>Action</th>}</tr></thead><tbody>
-        {policies.map((item) => <tr key={item.id} onClick={() => setSelectedPolicy(item.id)} className={selectedPolicy === item.id ? 'selected-row' : ''}><td>{item.name}</td><td>{item.process}</td><td>{item.rules?.map((rule) => `${rule.key}: ${String(rule.value)}`).join(', ') || 'No rules'}</td><td>{item.active ? 'Active' : 'Inactive'}</td>{canManage && <td><button className="text-btn" type="button" onClick={(event) => { event.stopPropagation(); togglePolicy(item).catch((error) => setMessage(error.message)) }}>{item.active ? 'Deactivate' : 'Activate'}</button></td>}</tr>)}
+        {policies.map((item) => <tr key={item.id} onClick={() => setSelectedPolicy(item.id)} className={selectedPolicy === item.id ? 'selected-row' : ''}><td>{item.name} · v{item.version || 1}</td><td>{item.process}</td><td>{item.rules?.map((rule) => `${rule.key}: ${String(rule.value)}`).join(', ') || 'No rules'}</td><td>{item.active ? 'Active' : 'Inactive'}</td>{canManage && <td className="row-actions"><button className="text-btn" type="button" onClick={(event) => { event.stopPropagation(); togglePolicy(item).catch((error) => setMessage(error.message)) }}>{item.active ? 'Deactivate' : 'Activate'}</button><button className="text-btn" type="button" onClick={(event) => { event.stopPropagation(); loadVersions(item).catch((error) => setMessage(error.message)) }}>History</button></td>}</tr>)}
       </tbody></table></div>
       {!policies.length && <p className="muted">No applicable policies.</p>}
     </section>
@@ -1176,6 +1189,7 @@ function PolicyPage({ user }: { user: UserSummary | null }) {
         <label>Assign location<input value={location} onChange={(event) => setLocation(event.target.value)} placeholder="Location" /></label>
         <button className="secondary-btn" type="submit">Assign policy</button>
       </form>
+      {versions.length > 0 && <ul className="list-stack">{versions.map((item) => <li key={item.id}><span>Version {item.version}: {item.snapshot.name} · {item.snapshot.process}</span><small>{new Date(item.changed_at).toLocaleString()}</small></li>)}</ul>}
     </section>}
   </div>
 }
@@ -1618,6 +1632,18 @@ function AiAssistantPage() {
   const [messages, setMessages] = useState<AssistantMessage[]>([])
   const [message, setMessage] = useState('')
   const [loading, setLoading] = useState(false)
+
+  useEffect(() => {
+    apiFetch<{ query: string; response: string; source_modules: string[] }[]>('/ai/history')
+      .then((history) => {
+        setMessages(history.map((item) => ({
+          prompt: item.query,
+          answer: item.response,
+          sources: item.source_modules.map((module) => ({ module })),
+        })))
+      })
+      .catch((error) => setMessage(error.message))
+  }, [])
 
   const submit = async (event: FormEvent) => {
     event.preventDefault()
@@ -2209,6 +2235,10 @@ function CompliancePage({ user }: { user: UserSummary | null }) {
   const [incidentDate, setIncidentDate] = useState(new Date().toISOString().slice(0, 10))
   const [complaint, setComplaint] = useState('')
   const [respondent, setRespondent] = useState('')
+  const [retentionType, setRetentionType] = useState('location_pings')
+  const [retentionDays, setRetentionDays] = useState('90')
+  const [retentionPolicies, setRetentionPolicies] = useState<{ id: string; record_type: string; retention_days: number; last_run_at?: string }[]>([])
+  const [retentionPreview, setRetentionPreview] = useState<{ total_would_delete: number; policies: { record_type: string; would_delete: number }[] } | null>(null)
   const [message, setMessage] = useState('')
   const [restrictedAccess, setRestrictedAccess] = useState(false)
   const isAdmin = user?.role === 'admin'
@@ -2229,8 +2259,12 @@ function CompliancePage({ user }: { user: UserSummary | null }) {
       setRestrictedAccess(true)
     }
     if (isAdmin) {
-      const employeePage = await apiFetch<{ items: Employee[] }>('/employees/')
+      const [employeePage, policies] = await Promise.all([
+        apiFetch<{ items: Employee[] }>('/employees/'),
+        apiFetch<typeof retentionPolicies>('/privacy/retention-policies'),
+      ])
       setEmployees(employeePage.items)
+      setRetentionPolicies(policies)
       if (!committeeId && employeePage.items.length) setCommitteeId(employeePage.items[0].email)
     }
   }
@@ -2276,6 +2310,18 @@ function CompliancePage({ user }: { user: UserSummary | null }) {
     await apiFetch(`/privacy/requests/${item.id}/decision`, { method: 'PATCH', body: JSON.stringify({ status, response: 'Reviewed by HR administrator' }) })
     await load()
   }
+  const createRetentionPolicy = async (event: FormEvent) => {
+    event.preventDefault()
+    await apiFetch('/privacy/retention-policies', { method: 'POST', body: JSON.stringify({ record_type: retentionType, retention_days: Number(retentionDays) }) })
+    await load()
+  }
+  const previewRetention = async () => setRetentionPreview(await apiFetch('/privacy/retention/preview'))
+  const runRetention = async () => {
+    const result = await apiFetch<{ deleted_count: number }>('/privacy/retention/run', { method: 'POST' })
+    setMessage(`Retention run removed ${result.deleted_count} expired records`)
+    setRetentionPreview(null)
+    await load()
+  }
 
   return <div className="module-stack">
     <section className="panel"><div className="panel-header"><div><p className="eyebrow">Restricted case handling</p><h3>POSH compliance</h3></div></div>
@@ -2292,6 +2338,11 @@ function CompliancePage({ user }: { user: UserSummary | null }) {
       <div className="table-scroll"><table className="table"><thead><tr><th>Privacy request</th><th>Status</th>{isAdmin && <th>Process</th>}</tr></thead><tbody>{requests.map((item) => <tr key={item.id}><td>{item.request_type} · {item.description}</td><td>{item.status}</td>{isAdmin && <td>{item.status === 'submitted' && <div className="row-actions"><button className="text-btn" type="button" onClick={() => decidePrivacyRequest(item, 'completed').catch((error) => setMessage(error.message))}>Complete</button><button className="text-btn danger" type="button" onClick={() => decidePrivacyRequest(item, 'rejected').catch((error) => setMessage(error.message))}>Reject</button></div>}</td>}</tr>)}</tbody></table></div>
       <p className="muted">Recorded consent entries: {consents.length}</p>
     </section>
+    {isAdmin && <section className="panel"><div className="panel-header"><div><p className="eyebrow">Admin controls</p><h3>Data retention</h3></div></div>
+      <form className="workflow-form" onSubmit={(event) => createRetentionPolicy(event).catch((error) => setMessage(error.message))}><label>Record class<select value={retentionType} onChange={(event) => setRetentionType(event.target.value)}><option value="attendance">Attendance</option><option value="location_pings">Location pings</option><option value="notifications">Notifications</option><option value="ai_queries">AI queries</option><option value="announcement_reads">Announcement reads</option></select></label><label>Retention days<input type="number" min="1" value={retentionDays} onChange={(event) => setRetentionDays(event.target.value)} required /></label><button className="secondary-btn" type="submit">Save retention policy</button><button className="text-btn" type="button" onClick={() => previewRetention().catch((error) => setMessage(error.message))}>Preview expired records</button></form>
+      <ul className="list-stack">{retentionPolicies.map((item) => <li key={item.id}><span>{item.record_type.replaceAll('_', ' ')} · {item.retention_days} days</span><small>{item.last_run_at ? `Last run ${new Date(item.last_run_at).toLocaleString()}` : 'Not run yet'}</small></li>)}</ul>
+      {retentionPreview && <div className="run-preview"><strong>{retentionPreview.total_would_delete} records eligible</strong><span>{retentionPreview.policies.map((item) => `${item.record_type}: ${item.would_delete}`).join(' · ')}</span><button className="primary-btn" type="button" onClick={() => runRetention().catch((error) => setMessage(error.message))}>Run retention now</button></div>}
+    </section>}
   </div>
 }
 

@@ -113,10 +113,20 @@ def ai_assistant(payload: Dict[str, Any], current_user: Dict[str, Any] = Depends
             "org_id": current_user["org_id"],
             "user_id": current_user["id"],
             "query": query,
+            "response": result["summary"],
             "source_modules": [item["module"] for item in result["sources"]],
             "created_at": datetime.now(timezone.utc).isoformat(),
         })
     return result
+
+
+@router.get("/history")
+def ai_conversation_history(current_user: Dict[str, Any] = Depends(get_current_user)) -> List[Dict[str, Any]]:
+    org_id = _org_id(current_user)
+    return sorted(
+        [item for item in store.list_module_records("ai_query_logs", org_id) if item.get("user_id") == current_user["id"]],
+        key=lambda item: item.get("created_at", ""),
+    )
 
 
 @router.post("/policy-assistant")
@@ -135,6 +145,14 @@ def policy_assistant(payload: Dict[str, Any], current_user: Dict[str, Any] = Dep
             f"{item['policy']}: " + (", ".join(f"{rule['key']} = {rule['value']}" for rule in item["rules"]) or item["description"] or "No detailed rules are configured")
             for item in grounded
         )
+    store.create_module_record("ai_query_logs", {
+        "org_id": current_user["org_id"],
+        "user_id": current_user["id"],
+        "query": question,
+        "response": answer,
+        "source_modules": ["policies"],
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
     return {"answer": answer, "sources": grounded}
 
 

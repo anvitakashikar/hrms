@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -9,6 +9,13 @@ from app.services.notification_service import notify_user
 
 router = APIRouter()
 store = get_store()
+RETENTION_COLLECTIONS = {
+    "attendance": "attendance_records",
+    "location_pings": "location_ping_logs",
+    "notifications": "notification_logs",
+    "ai_queries": "ai_query_logs",
+    "announcement_reads": "announcement_reads",
+}
 
 
 def _org_id(user: Dict[str, Any]) -> str:
@@ -257,8 +264,8 @@ def create_retention_policy(payload: Dict[str, Any], current_user: Dict[str, Any
         retention_days = int(payload["retention_days"])
     except (KeyError, TypeError, ValueError) as exc:
         raise HTTPException(status_code=422, detail="retention_days must be an integer") from exc
-    if not record_type or retention_days < 1:
-        raise HTTPException(status_code=422, detail="Record type and positive retention period are required")
+    if record_type not in RETENTION_COLLECTIONS or retention_days < 1:
+        raise HTTPException(status_code=422, detail="Supported types are attendance, location_pings, notifications, ai_queries, and announcement_reads; retention must be positive")
     policy = store.create_module_record("data_retention_policies", {
         "org_id": org_id,
         "record_type": record_type,
@@ -274,6 +281,56 @@ def create_retention_policy(payload: Dict[str, Any], current_user: Dict[str, Any
 @router.get("/privacy/retention-policies")
 def list_retention_policies(current_user: Dict[str, Any] = Depends(require_roles("admin"))) -> List[Dict[str, Any]]:
     return store.list_module_records("data_retention_policies", _org_id(current_user))
+
+
+def _retention_candidates(org_id: str, policy: Dict[str, Any], now: datetime) -> List[Dict[str, Any]]:
+    collection = RETENTION_COLLECTIONS[policy["record_type"]]
+    cutoff = now - timedelta(days=int(policy["retention_days"]))
+    candidates = []
+    for record in store.list_module_records(collection, org_id):
+        timestamp = next((record.get(field) for field in ("created_at", "occurred_at", "read_at", "work_date") if record.get(field)), None)
+        if not timestamp:
+            continue
+        try:
+            recorded_at = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+            if recorded_at.tzinfo is None:
+                recorded_at = recorded_at.replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        if recorded_at < cutoff:
+            candidates.append(record)
+    return candidates
+
+
+@router.get("/privacy/retention/preview")
+def preview_retention(current_user: Dict[str, Any] = Depends(require_roles("admin"))) -> Dict[str, Any]:
+    org_id = _org_id(current_user)
+    now = datetime.now(timezone.utc)
+    results = []
+    for policy in store.list_module_records("data_retention_policies", org_id):
+        if not policy.get("active"):
+            continue
+        candidates = _retention_candidates(org_id, policy, now)
+        results.append({"policy_id": policy["id"], "record_type": policy["record_type"], "retention_days": policy["retention_days"], "would_delete": len(candidates)})
+    return {"evaluated_at": now.isoformat(), "policies": results, "total_would_delete": sum(item["would_delete"] for item in results)}
+
+
+@router.post("/privacy/retention/run")
+def run_retention(current_user: Dict[str, Any] = Depends(require_roles("admin"))) -> Dict[str, Any]:
+    org_id = _org_id(current_user)
+    now = datetime.now(timezone.utc)
+    results = []
+    for policy in store.list_module_records("data_retention_policies", org_id):
+        if not policy.get("active"):
+            continue
+        collection = RETENTION_COLLECTIONS[policy["record_type"]]
+        candidates = _retention_candidates(org_id, policy, now)
+        deleted = sum(1 for record in candidates if store.delete_module_record(collection, record["id"], org_id))
+        results.append({"policy_id": policy["id"], "record_type": policy["record_type"], "deleted": deleted})
+        store.update_module_record("data_retention_policies", policy["id"], org_id, {"last_run_at": now.isoformat(), "last_deleted_count": deleted})
+    summary = {"run_at": now.isoformat(), "policies": results, "deleted_count": sum(item["deleted"] for item in results)}
+    store.add_audit_log(current_user["id"], org_id, "privacy.retention.executed", summary)
+    return summary
 
 
 @router.get("/privacy/access-logs")

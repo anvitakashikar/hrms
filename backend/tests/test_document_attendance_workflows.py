@@ -510,6 +510,10 @@ def test_ai_assistant_uses_scoped_records_and_configured_policies():
     assert answer.json()["sources"][0]["module"] == "expenses"
     manager_payroll = client.post("/api/ai/assistant", headers=manager_headers, json={"prompt": "Show payroll salary for my team"})
     assert "restricted" in manager_payroll.json()["summary"]
+    employee_history = client.get("/api/ai/history", headers=employee_headers)
+    assert employee_history.status_code == 200
+    assert any(item["query"] == "What is the status of my expense claims?" and item["response"] for item in employee_history.json())
+    assert all(item["user_id"] == employee["id"] for item in employee_history.json())
 
     unconfigured = client.post("/api/ai/policy-assistant", headers=employee_headers, json={"question": "What is the leave policy?"})
     assert "will not infer or invent" in unconfigured.json()["answer"]

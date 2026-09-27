@@ -11,7 +11,7 @@ router = APIRouter()
 store = get_store()
 HR_ROLES = ("admin", "hr")
 REVIEW_ROLES = ("admin", "hr", "manager")
-CLEARANCE_DEPARTMENTS = ("hr", "finance", "it", "assets")
+CLEARANCE_DEPARTMENTS = ("hr", "finance", "it", "documents", "assets")
 
 
 def _org_id(user: Dict[str, Any]) -> str:
@@ -111,6 +111,16 @@ def update_exit_clearance(clearance_id: str, payload: Dict[str, Any], current_us
     decision = payload.get("status")
     if decision not in {"cleared", "blocked"}:
         raise HTTPException(status_code=422, detail="Clearance status must be cleared or blocked")
+    if decision == "cleared" and clearance["department"] == "assets":
+        outstanding = [item for item in store.list_module_records("assets", org_id) if item.get("assigned_user_id") == clearance["user_id"] and item.get("status") in {"assigned", "acknowledged"}]
+        if outstanding:
+            raise HTTPException(status_code=409, detail="Return assigned assets before completing asset clearance")
+    if decision == "cleared" and clearance["department"] == "documents":
+        required_categories = [item for item in store.list_module_records("document_categories", org_id) if item.get("active") and item.get("required")]
+        documents = store.list_module_records("employee_documents", org_id)
+        missing = [category["name"] for category in required_categories if not any(item.get("owner_user_id") == clearance["user_id"] and item.get("category_id") == category["id"] and item.get("status") == "approved" for item in documents)]
+        if missing:
+            raise HTTPException(status_code=409, detail="Complete required document verification before clearance: " + ", ".join(missing))
     updated = store.update_module_record("exit_clearance_checklists", clearance_id, org_id, {
         "status": decision,
         "completed_by": current_user["id"],
@@ -173,12 +183,14 @@ def preview_fnf_settlement(payload: Dict[str, Any], current_user: Dict[str, Any]
     reimbursements = round(sum(float(item.get("amount", 0)) for item in approved_expenses), 2)
     overtime = [item for item in store.list_module_records("overtime_records", org_id) if item.get("user_id") == user_id and item.get("status") == "approved"]
     overtime_minutes = sum(int(item.get("minutes", 0)) for item in overtime)
+    overtime_weighted_minutes = sum(int(item.get("minutes", 0)) * float(item.get("rate_multiplier", 1)) for item in overtime)
+    overtime_amount = round(monthly_salary / (30 * 8 * 60) * overtime_weighted_minutes, 2)
     deductions = [item for item in store.list_module_records("employee_deductions", org_id) if item.get("user_id") == user_id and item.get("active")]
     deduction_total = round(sum(float(item.get("amount", 0)) for item in deductions), 2)
     clearance_items = [item for item in store.list_module_records("exit_clearance_checklists", org_id) if item.get("exit_request_id") == exit_request["id"]]
     gratuity = float(payload.get("gratuity_amount", 0))
     leave_settlement = float(payload.get("leave_settlement", 0))
-    gross = round(salary_proration + reimbursements + leave_settlement + gratuity, 2)
+    gross = round(salary_proration + reimbursements + overtime_amount + leave_settlement + gratuity, 2)
     net = round(gross - deduction_total, 2)
     return {
         "exit_request_id": exit_request["id"],
@@ -186,6 +198,7 @@ def preview_fnf_settlement(payload: Dict[str, Any], current_user: Dict[str, Any]
         "salary_proration": salary_proration,
         "reimbursements": reimbursements,
         "approved_overtime_minutes": overtime_minutes,
+        "approved_overtime_amount": overtime_amount,
         "leave_settlement": leave_settlement,
         "gratuity": gratuity,
         "deductions": deduction_total,

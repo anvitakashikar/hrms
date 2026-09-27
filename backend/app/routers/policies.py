@@ -36,6 +36,7 @@ def create_policy(payload: Dict[str, Any], current_user: Dict[str, Any] = Depend
         "effective_from": payload.get("effective_from", date.today().isoformat()),
         "effective_to": payload.get("effective_to"),
         "active": bool(payload.get("active", True)),
+        "version": 1,
         "created_by": current_user["id"],
     })
     store.add_audit_log(current_user["id"], org_id, "policy.created", {"record_id": policy["id"], "process": process})
@@ -60,14 +61,34 @@ def update_policy(
     current_user: Dict[str, Any] = Depends(require_roles(*HR_ROLES)),
 ) -> Dict[str, Any]:
     org_id = _org_id(current_user)
+    current = store.get_module_record("policies", policy_id, org_id)
+    if current is None:
+        raise HTTPException(status_code=404, detail="Policy not found")
     allowed = {key: payload[key] for key in (
         "name", "description", "process", "department", "location", "employee_user_id", "effective_from", "effective_to", "active"
     ) if key in payload}
+    if not allowed:
+        raise HTTPException(status_code=422, detail="No policy fields were provided")
+    store.create_module_record("policy_versions", {
+        "org_id": org_id,
+        "policy_id": policy_id,
+        "version": current.get("version", 1),
+        "snapshot": current,
+        "changed_by": current_user["id"],
+        "changed_at": datetime.now(timezone.utc).isoformat(),
+    })
+    allowed["version"] = current.get("version", 1) + 1
     policy = store.update_module_record("policies", policy_id, org_id, allowed)
-    if policy is None:
-        raise HTTPException(status_code=404, detail="Policy not found")
     store.add_audit_log(current_user["id"], org_id, "policy.updated", {"record_id": policy_id, "changes": allowed})
     return policy
+
+
+@router.get("/{policy_id}/versions")
+def list_policy_versions(policy_id: str, current_user: Dict[str, Any] = Depends(require_roles(*HR_ROLES))) -> List[Dict[str, Any]]:
+    org_id = _org_id(current_user)
+    if store.get_module_record("policies", policy_id, org_id) is None:
+        raise HTTPException(status_code=404, detail="Policy not found")
+    return [item for item in store.list_module_records("policy_versions", org_id) if item.get("policy_id") == policy_id]
 
 
 @router.post("/{policy_id}/rules")
