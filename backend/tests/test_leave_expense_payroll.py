@@ -62,6 +62,12 @@ def test_leave_application_and_approval_flow():
     )
     assert approval.status_code == 200, approval.text
     assert approval.json()["status"] == "approved"
+    notifications = client.get(
+        "/api/notifications",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert notifications.status_code == 200, notifications.text
+    assert any(item["event"] == "leave.approved" for item in notifications.json())
 
 
 def test_expense_claim_and_payroll_snapshot():

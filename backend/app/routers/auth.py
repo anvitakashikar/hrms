@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.dependencies.auth import get_current_user
-from app.schemas.auth import LoginRequest, SignupRequest, TokenResponse, UserOut
+from app.schemas.auth import LoginRequest, LoginResponse, SignupRequest, UserOut
 from app.services.auth_service import AuthService
 
 router = APIRouter()
@@ -13,7 +13,7 @@ def signup(payload: SignupRequest) -> dict:
     return service.signup(payload.model_dump())
 
 
-@router.post("/login", response_model=TokenResponse)
+@router.post("/login", response_model=LoginResponse)
 def login(payload: LoginRequest) -> dict:
     service = AuthService()
     return service.login(payload.email, payload.password)

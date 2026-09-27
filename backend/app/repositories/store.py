@@ -15,15 +15,33 @@ class InMemoryStore:
         self.expense_claims: Dict[str, Dict[str, Any]] = {}
         self.attendance_records: Dict[str, Dict[str, Any]] = {}
         self.audit_logs: List[Dict[str, Any]] = []
+        self.module_records: Dict[str, Dict[str, Dict[str, Any]]] = {}
 
-    def create_organization(self, org_name: str) -> Dict[str, Any]:
+    def create_organization(self, org_name: str, org_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        org_name = org_name or (org_data or {}).get("name")
+        if not org_name:
+            raise ValueError("Organization name is required")
         for org in self.organizations.values():
             if org.get("name", "").lower() == org_name.lower():
                 return copy.deepcopy(org)
+        data = org_data or {}
         org_id = str(uuid.uuid4())
         entity = {
             "id": org_id,
             "name": org_name,
+            "legal_name": data.get("legal_name") or org_name,
+            "email": data.get("email"),
+            "phone": data.get("phone"),
+            "website": data.get("website"),
+            "industry": data.get("industry"),
+            "company_type": data.get("company_type"),
+            "timezone": data.get("timezone") or "UTC",
+            "currency": data.get("currency") or "USD",
+            "address": data.get("address"),
+            "city": data.get("city"),
+            "state": data.get("state"),
+            "country": data.get("country"),
+            "postal_code": data.get("postal_code"),
             "created_at": datetime.utcnow().isoformat(),
             "is_active": True,
         }
@@ -39,7 +57,7 @@ class InMemoryStore:
             "first_name": user_data["first_name"],
             "last_name": user_data["last_name"],
             "role": user_data["role"],
-            "org_id": user_data["org_id"],
+            "org_id": user_data.get("org_id"),
             "is_active": True,
             "created_at": datetime.utcnow().isoformat(),
         }
@@ -55,6 +73,19 @@ class InMemoryStore:
     def get_user_by_id(self, user_id: str) -> Optional[Dict[str, Any]]:
         user = self.users.get(user_id)
         return copy.deepcopy(user) if user else None
+
+    def update_user(self, user_id: str, updates: Dict[str, Any]) -> Dict[str, Any]:
+        user = self.users.get(user_id)
+        if user is None:
+            raise KeyError(f"User {user_id} not found")
+        user.update(updates)
+        return copy.deepcopy(user)
+
+    def get_organization_by_id(self, org_id: Optional[str]) -> Optional[Dict[str, Any]]:
+        if not org_id:
+            return None
+        org = self.organizations.get(org_id)
+        return copy.deepcopy(org) if org else None
 
     def list_employees(self, org_id: str) -> List[Dict[str, Any]]:
         items = [emp for emp in self.employees.values() if emp.get("org_id") == org_id]
@@ -143,3 +174,38 @@ class InMemoryStore:
         }
         self.audit_logs.append(item)
         return copy.deepcopy(item)
+
+    def create_module_record(self, module: str, data: Dict[str, Any]) -> Dict[str, Any]:
+        records = self.module_records.setdefault(module, {})
+        item = copy.deepcopy(data)
+        item.setdefault("id", str(uuid.uuid4()))
+        item.setdefault("created_at", datetime.utcnow().isoformat())
+        records[item["id"]] = item
+        return copy.deepcopy(item)
+
+    def list_module_records(self, module: str, org_id: str) -> List[Dict[str, Any]]:
+        records = self.module_records.get(module, {})
+        return [copy.deepcopy(item) for item in records.values() if item.get("org_id") == org_id]
+
+    def get_module_record(self, module: str, record_id: str, org_id: str) -> Optional[Dict[str, Any]]:
+        item = self.module_records.get(module, {}).get(record_id)
+        if item is None or item.get("org_id") != org_id:
+            return None
+        return copy.deepcopy(item)
+
+    def update_module_record(self, module: str, record_id: str, org_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        records = self.module_records.get(module, {})
+        item = records.get(record_id)
+        if item is None or item.get("org_id") != org_id:
+            return None
+        item.update(copy.deepcopy(updates))
+        item["updated_at"] = datetime.utcnow().isoformat()
+        return copy.deepcopy(item)
+
+    def delete_module_record(self, module: str, record_id: str, org_id: str) -> bool:
+        records = self.module_records.get(module, {})
+        item = records.get(record_id)
+        if item is None or item.get("org_id") != org_id:
+            return False
+        del records[record_id]
+        return True

@@ -27,6 +27,17 @@ def test_extended_hrms_lifecycle_modules():
             "org_name": "ExtendedOrg",
         },
     )
+    client.post(
+        "/api/auth/signup",
+        json={
+            "email": "employee-extended@demo.com",
+            "password": "StrongPass123!",
+            "first_name": "Extended",
+            "last_name": "Employee",
+            "role": "employee",
+            "org_name": "ExtendedOrg",
+        },
+    )
 
     token = _login("admin2@demo.com")
 
@@ -49,7 +60,7 @@ def test_extended_hrms_lifecycle_modules():
         headers={"Authorization": f"Bearer {token}"},
         json={
             "title": "Laptop setup",
-            "assignee": "employee@demo.com",
+            "assignee": "employee-extended@demo.com",
             "due_date": "2026-10-01",
             "status": "pending",
         },
