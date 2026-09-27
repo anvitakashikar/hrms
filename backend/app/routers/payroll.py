@@ -2,7 +2,7 @@ import calendar
 import csv
 import io
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 
@@ -59,19 +59,29 @@ def _calculate_payslip(org_id: str, user_id: str, structure: Dict[str, Any], sta
     if unpaid_deduction:
         deductions["Unpaid leave"] = unpaid_deduction
 
-    attendance = [item for item in store.list_module_records("attendance_records", org_id) if item.get("user_id") == user_id and start.isoformat() <= item.get("work_date", "") <= end.isoformat()]
-    overtime_minutes = sum(int(item.get("overtime_minutes", 0)) for item in attendance)
-    overtime_rules = [item for item in store.list_module_records("deduction_rules", org_id) if item.get("active") and item.get("kind") == "overtime"]
-    if overtime_minutes and overtime_rules:
+    overtime_records = [
+        item for item in store.list_module_records("overtime_records", org_id)
+        if item.get("user_id") == user_id and item.get("status") == "approved"
+        and start.isoformat() <= item.get("work_date", "") <= end.isoformat()
+    ]
+    overtime_minutes = sum(int(item.get("minutes", 0)) for item in overtime_records)
+    overtime_rules = [item for item in store.list_module_records("overtime_rate_rules", org_id) if item.get("active")]
+    if not overtime_rules:
+        overtime_rules = [item for item in store.list_module_records("deduction_rules", org_id) if item.get("active") and item.get("kind") == "overtime"]
+    if overtime_minutes and (overtime_records or overtime_rules):
         weekday_count = sum(1 for day_number in range(1, period_days + 1) if date(start.year, start.month, day_number).weekday() < 5)
-        standard_hours = float(overtime_rules[-1].get("standard_hours_per_day", 8))
-        multiplier = float(overtime_rules[-1].get("rate_multiplier", 1.5))
-        overtime_amount = float(structure["base_salary"]) / max(weekday_count * standard_hours * 60, 1) * overtime_minutes * multiplier
+        standard_hours = float(overtime_rules[-1].get("standard_hours_per_day", 8)) if overtime_rules else 8.0
+        if overtime_records:
+            weighted_minutes = sum(int(item.get("minutes", 0)) * float(item.get("rate_multiplier", 1)) for item in overtime_records)
+        else:
+            weighted_minutes = overtime_minutes * float(overtime_rules[-1].get("rate_multiplier", 1.5))
+        overtime_amount = float(structure["base_salary"]) / max(weekday_count * standard_hours * 60, 1) * weighted_minutes
         earnings["Overtime"] = round(overtime_amount, 2)
 
     gross = round(sum(earnings.values()), 2)
     rules = [item for item in store.list_module_records("deduction_rules", org_id) if item.get("active")]
     contributions: Dict[str, Dict[str, float]] = {}
+    statutory_info = next((item for item in store.list_module_records("employee_statutory_info", org_id) if item.get("user_id") == user_id), {})
     for rule in rules:
         kind = rule.get("kind")
         if kind == "deduction":
@@ -82,10 +92,13 @@ def _calculate_payslip(org_id: str, user_id: str, structure: Dict[str, Any], sta
             continue
         if kind not in {"pf", "esi", "tax"}:
             continue
+        if rule.get("employee_eligibility_required") and not statutory_info.get(f"{kind}_eligible", False):
+            continue
         if gross < float(rule.get("threshold", 0)):
             continue
-        employee_amount = round(gross * float(rule.get("employee_rate", 0)) / 100, 2)
-        employer_amount = round(gross * float(rule.get("employer_rate", 0)) / 100, 2)
+        contribution_wages = min(gross, float(rule["wage_cap"])) if rule.get("wage_cap") is not None else gross
+        employee_amount = round(contribution_wages * float(rule.get("employee_rate", 0)) / 100, 2)
+        employer_amount = round(contribution_wages * float(rule.get("employer_rate", 0)) / 100, 2)
         label = {"pf": "PF", "esi": "ESI", "tax": "Tax/TDS"}[kind]
         if employee_amount:
             deductions[label] = employee_amount
@@ -95,7 +108,7 @@ def _calculate_payslip(org_id: str, user_id: str, structure: Dict[str, Any], sta
     for item in recurring:
         if item.get("user_id") != user_id or not item.get("active"):
             continue
-        if not item.get("recurring") and item.get("effective_date") != start.isoformat():
+        if not item.get("recurring") and not (start.isoformat() <= item.get("effective_date", "") <= end.isoformat()):
             continue
         amount = float(item.get("amount", 0))
         if item.get("calculation") == "percent":
@@ -210,6 +223,11 @@ def create_deduction_rule(payload: Dict[str, Any], current_user: Dict[str, Any] 
     return store.create_module_record("deduction_rules", record)
 
 
+@router.get("/deduction-rules")
+def list_deduction_rules(current_user: Dict[str, Any] = Depends(require_roles(*HR_ROLES))) -> List[Dict[str, Any]]:
+    return store.list_module_records("deduction_rules", _org_id(current_user))
+
+
 @router.post("/employee-deductions", status_code=status.HTTP_201_CREATED)
 def assign_employee_deduction(payload: Dict[str, Any], current_user: Dict[str, Any] = Depends(require_roles(*HR_ROLES))) -> Dict[str, Any]:
     org_id = _org_id(current_user)
@@ -220,17 +238,70 @@ def assign_employee_deduction(payload: Dict[str, Any], current_user: Dict[str, A
     amount = float(payload.get("amount", 0))
     if not name or amount <= 0:
         raise HTTPException(status_code=422, detail="Deduction name and positive amount are required")
+    calculation = payload.get("calculation", "fixed")
+    if calculation not in {"fixed", "percent"}:
+        raise HTTPException(status_code=422, detail="Deduction calculation must be fixed or percent")
+    recurring = bool(payload.get("recurring", True))
+    effective_date = payload.get("effective_date")
+    if not recurring:
+        try:
+            effective_date = date.fromisoformat(effective_date).isoformat()
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail="One-time deductions require an effective_date") from exc
     return store.create_module_record("employee_deductions", {
         "org_id": org_id,
         "user_id": user["id"],
         "name": name,
         "amount": amount,
-        "calculation": payload.get("calculation", "fixed"),
-        "recurring": bool(payload.get("recurring", True)),
-        "effective_date": payload.get("effective_date"),
+        "calculation": calculation,
+        "recurring": recurring,
+        "effective_date": effective_date,
         "active": True,
         "created_by": current_user["id"],
     })
+
+
+@router.get("/employee-deductions")
+def list_employee_deductions(
+    user_id: Optional[str] = None,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> List[Dict[str, Any]]:
+    org_id = _org_id(current_user)
+    target_id = user_id or current_user["id"]
+    if target_id != current_user["id"] and current_user.get("role") not in HR_ROLES:
+        raise HTTPException(status_code=403, detail="Employee deduction data is restricted")
+    return [item for item in store.list_module_records("employee_deductions", org_id) if item.get("user_id") == target_id]
+
+
+@router.get("/deduction-history")
+def deduction_history(
+    user_id: Optional[str] = None,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> List[Dict[str, Any]]:
+    org_id = _org_id(current_user)
+    target_id = user_id or current_user["id"]
+    if target_id != current_user["id"] and current_user.get("role") not in HR_ROLES:
+        raise HTTPException(status_code=403, detail="Deduction history is restricted")
+    items = [item for item in store.list_module_records("deduction_audit_logs", org_id) if item.get("user_id") == target_id]
+    if current_user.get("role") in HR_ROLES:
+        store.add_audit_log(current_user["id"], org_id, "sensitive_data.deduction_history_accessed", {"user_id": target_id})
+    return items
+
+
+@router.get("/statutory/{kind}/reports")
+def statutory_contribution_report(kind: str, current_user: Dict[str, Any] = Depends(require_roles(*HR_ROLES))) -> Dict[str, Any]:
+    org_id = _org_id(current_user)
+    if kind not in {"pf", "esi"}:
+        raise HTTPException(status_code=404, detail="Contribution report not found")
+    collection = "pf_contribution_records" if kind == "pf" else "esi_contribution_records"
+    records = store.list_module_records(collection, org_id)
+    return {
+        "kind": kind,
+        "record_count": len(records),
+        "employee_total": round(sum(float(item.get("employee_contribution", 0)) for item in records), 2),
+        "employer_total": round(sum(float(item.get("employer_contribution", 0)) for item in records), 2),
+        "records": records,
+    }
 
 
 @router.post("/runs", status_code=status.HTTP_201_CREATED)
@@ -378,6 +449,23 @@ def download_payslip(payslip_id: str, current_user: Dict[str, Any] = Depends(get
 
 @router.get("/summary")
 def payroll_summary(current_user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+    if current_user.get("role") in HR_ROLES:
+        runs = store.list_module_records("payroll_runs", _org_id(current_user))
+        runs.sort(key=lambda item: item.get("period_end", ""), reverse=True)
+        if runs:
+            latest_run = runs[0]
+            return {
+                "employee_id": None,
+                "org_id": current_user.get("org_id"),
+                "base_salary": 0,
+                "deductions": latest_run.get("total_deductions", 0),
+                "net_salary": latest_run.get("total_net", 0),
+                "gross_pay": latest_run.get("total_gross", 0),
+                "employee_count": latest_run.get("employee_count", 0),
+                "status": latest_run.get("status"),
+                "period": latest_run.get("period_start", "")[:7],
+            }
+        return {"employee_id": None, "org_id": current_user.get("org_id"), "base_salary": 0, "deductions": 0, "net_salary": 0, "gross_pay": 0, "employee_count": 0, "status": "no_payroll_run"}
     payslips = [item for item in list_payslips(current_user) if item.get("status") == "available"]
     payslips.sort(key=lambda item: item.get("period_end", ""), reverse=True)
     if payslips:

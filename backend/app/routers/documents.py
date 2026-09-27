@@ -8,7 +8,7 @@ from fastapi.responses import FileResponse
 
 from app.database import get_store
 from app.dependencies.auth import get_current_user, require_roles
-from app.services.notification_service import notify_user
+from app.services.notification_service import notify_reviewers, notify_user
 
 router = APIRouter()
 store = get_store()
@@ -180,6 +180,7 @@ async def upload_document(request: Request, current_user: Dict[str, Any] = Depen
         "uploaded_at": datetime.utcnow().isoformat(),
     })
     store.add_audit_log(current_user["id"], org_id, "employee_document.uploaded", {"record_id": document_id})
+    notify_reviewers(org_id, "document.pending_verification", "Document awaits verification", f"{item['category']} was uploaded and needs review.", "employee_document", document_id)
     return {key: value for key, value in item.items() if key != "storage_path"}
 
 

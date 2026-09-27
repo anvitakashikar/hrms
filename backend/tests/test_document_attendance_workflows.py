@@ -291,6 +291,24 @@ def test_payroll_preview_approval_and_private_payslip():
         json={"name": "Configured PF", "kind": "pf", "employee_rate": 12, "employer_rate": 12},
     )
     assert pf_rule.status_code == 201, pf_rule.text
+    overtime_rule = client.post(
+        "/api/overtime/rules",
+        headers=admin_headers,
+        json={"name": "Approved overtime", "rate_multiplier": 2, "standard_hours_per_day": 8},
+    )
+    assert overtime_rule.status_code == 201, overtime_rule.text
+    overtime_request = client.post(
+        "/api/overtime/requests",
+        headers=employee_headers,
+        json={"work_date": "2026-09-15", "minutes": 60, "reason": "Release support"},
+    )
+    assert overtime_request.status_code == 201, overtime_request.text
+    overtime_decision = client.patch(
+        f"/api/overtime/requests/{overtime_request.json()['id']}/decision",
+        headers=admin_headers,
+        json={"status": "approved"},
+    )
+    assert overtime_decision.status_code == 200, overtime_decision.text
 
     run = client.post(
         "/api/payroll/runs",
@@ -300,9 +318,10 @@ def test_payroll_preview_approval_and_private_payslip():
     assert run.status_code == 201, run.text
     assert run.json()["status"] == "preview"
     payslip = run.json()["payslips"][0]
-    assert payslip["gross_pay"] == 6000
-    assert payslip["deductions"]["PF"] == 720
-    assert payslip["net_pay"] == 5280
+    assert payslip["gross_pay"] > 6000
+    assert payslip["overtime_minutes"] == 60
+    assert payslip["deductions"]["PF"] == round(payslip["gross_pay"] * 0.12, 2)
+    assert payslip["net_pay"] == round(payslip["gross_pay"] - payslip["total_deductions"], 2)
     assert client.get("/api/payroll/runs", headers=employee_headers).status_code == 403
 
     approval = client.patch(f"/api/payroll/runs/{run.json()['id']}/approve", headers=admin_headers)
@@ -314,7 +333,11 @@ def test_payroll_preview_approval_and_private_payslip():
     assert len(employee_payslips.json()) == 1
     download = client.get(f"/api/payroll/payslips/{payslip['id']}/download", headers=employee_headers)
     assert download.status_code == 200
-    assert "Net pay,5280.0" in download.text
+    assert f"Net pay,{payslip['net_pay']}" in download.text
+    hr_summary = client.get("/api/payroll/summary", headers=admin_headers)
+    assert hr_summary.status_code == 200
+    assert hr_summary.json()["employee_id"] is None
+    assert hr_summary.json()["gross_pay"] == run.json()["total_gross"]
 
 
 def test_recruitment_requisition_candidate_interview_and_offer():
@@ -471,8 +494,10 @@ def test_ai_assistant_uses_scoped_records_and_configured_policies():
     org_name = "AI Workflow Organization"
     admin = _signup("ai-admin@example.com", "admin", org_name)
     employee = _signup("ai-employee@example.com", "employee", org_name)
+    manager = _signup("ai-manager@example.com", "manager", org_name)
     admin_headers = {"Authorization": f"Bearer {_token(admin['email'])}"}
     employee_headers = {"Authorization": f"Bearer {_token(employee['email'])}"}
+    manager_headers = {"Authorization": f"Bearer {_token(manager['email'])}"}
     expense = client.post(
         "/api/expenses/claims",
         headers=employee_headers,
@@ -483,6 +508,8 @@ def test_ai_assistant_uses_scoped_records_and_configured_policies():
     assert answer.status_code == 200, answer.text
     assert "1 awaiting review" in answer.json()["summary"]
     assert answer.json()["sources"][0]["module"] == "expenses"
+    manager_payroll = client.post("/api/ai/assistant", headers=manager_headers, json={"prompt": "Show payroll salary for my team"})
+    assert "restricted" in manager_payroll.json()["summary"]
 
     unconfigured = client.post("/api/ai/policy-assistant", headers=employee_headers, json={"question": "What is the leave policy?"})
     assert "will not infer or invent" in unconfigured.json()["answer"]

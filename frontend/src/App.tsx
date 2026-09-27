@@ -164,11 +164,17 @@ function AppShell({ user, onLogout }: { user: UserSummary | null; onLogout: () =
       { label: 'Expenses', to: '/expenses' },
       { label: 'Payroll', to: '/payroll' },
       { label: 'Attendance', to: '/attendance' },
+      { label: 'Overtime', to: '/overtime' },
+      { label: 'Benefits & Tax', to: '/benefits' },
       { label: 'Holidays', to: '/holidays' },
       { label: 'Policies', to: '/policies' },
       { label: 'Documents', to: '/documents' },
       { label: 'Onboarding', to: '/onboarding' },
       { label: 'Announcements', to: '/announcements' },
+      { label: 'Compliance & Privacy', to: '/compliance' },
+      { label: 'Duty, Letters & Reports', to: '/lifecycle' },
+      { label: 'Analytics', to: '/analytics' },
+      { label: 'My Profile', to: '/profile' },
       { label: 'Recruitment', to: '/recruitment' },
       { label: 'Performance', to: '/performance' },
       { label: 'AI Assistant', to: '/ai' },
@@ -216,7 +222,13 @@ function AppShell({ user, onLogout }: { user: UserSummary | null; onLogout: () =
           <Route path="/documents" element={<DocumentsPage user={user} />} />
           <Route path="/onboarding" element={<OnboardingPage user={user} />} />
           <Route path="/announcements" element={<AnnouncementsPage user={user} />} />
+          <Route path="/compliance" element={<CompliancePage user={user} />} />
+          <Route path="/lifecycle" element={<LifecyclePage user={user} />} />
+          <Route path="/analytics" element={<AnalyticsPage />} />
+          <Route path="/profile" element={<ProfilePage />} />
           <Route path="/attendance" element={<AttendancePage user={user} />} />
+          <Route path="/overtime" element={<OvertimePage user={user} />} />
+          <Route path="/benefits" element={<BenefitsPage user={user} />} />
           <Route path="/holidays" element={<HolidayPage user={user} />} />
           <Route path="/policies" element={<PolicyPage user={user} />} />
           <Route path="/notifications" element={<NotificationsPage />} />
@@ -405,6 +417,7 @@ function ExpensesPage({ user }: { user: UserSummary | null }) {
   const [currency, setCurrency] = useState('INR')
   const [description, setDescription] = useState('')
   const [expenseDate, setExpenseDate] = useState(new Date().toISOString().slice(0, 10))
+  const [receiptFile, setReceiptFile] = useState<File | null>(null)
   const [message, setMessage] = useState('')
   const isReviewer = user?.role === 'admin' || user?.role === 'hr' || user?.role === 'manager'
 
@@ -433,6 +446,25 @@ function ExpensesPage({ user }: { user: UserSummary | null }) {
     await load()
   }
 
+  const extractReceipt = async () => {
+    if (!receiptFile) return
+    const form = new FormData()
+    form.set('file', receiptFile)
+    const extracted = await apiFetch<{
+      merchant_suggestion?: string | null
+      date_suggestion?: string | null
+      amount_suggestion?: number | null
+      currency_suggestion?: string
+      category_suggestion?: string
+    }>('/expenses/receipt-ocr', { method: 'POST', body: form })
+    if (extracted.merchant_suggestion) setDescription(`Receipt: ${extracted.merchant_suggestion}`)
+    if (extracted.date_suggestion) setExpenseDate(extracted.date_suggestion.replaceAll('/', '-'))
+    if (extracted.amount_suggestion) setAmount(String(extracted.amount_suggestion))
+    if (extracted.currency_suggestion) setCurrency(extracted.currency_suggestion)
+    if (extracted.category_suggestion) setCategory(extracted.category_suggestion)
+    setMessage('Receipt suggestions filled. Review and edit before submitting.')
+  }
+
   return (
     <section className="panel">
       <div className="panel-header"><div><p className="eyebrow">Reimbursements</p><h3>Expense Claims</h3></div></div>
@@ -443,6 +475,8 @@ function ExpensesPage({ user }: { user: UserSummary | null }) {
         <label>Currency<input maxLength={3} value={currency} onChange={(event) => setCurrency(event.target.value.toUpperCase())} required /></label>
         <label>Date<input type="date" value={expenseDate} onChange={(event) => setExpenseDate(event.target.value)} required /></label>
         <label>Description<input value={description} onChange={(event) => setDescription(event.target.value)} required /></label>
+        <label>Receipt file<input type="file" accept=".pdf,.txt,.png,.jpg,.jpeg" onChange={(event) => setReceiptFile(event.target.files?.[0] || null)} /></label>
+        <button className="secondary-btn" type="button" disabled={!receiptFile} onClick={() => extractReceipt().catch((error) => setMessage(error.message))}>Extract receipt suggestions</button>
         <button className="primary-btn" type="submit">Submit claim</button>
       </form>}
       <div className="table-scroll"><table className="table">
@@ -1163,6 +1197,27 @@ interface CandidateApplication {
   status: string
 }
 
+interface ResumeExtraction {
+  id: string
+  review_status: string
+  extracted_fields: {
+    candidate_name_suggestion?: string
+    email_suggestion?: string | null
+    phone_suggestion?: string | null
+    skills?: string[]
+    qualifications?: string[]
+    experience_years?: number | null
+  }
+}
+
+interface CandidateMatch {
+  application_id: string
+  candidate_name: string
+  score: number
+  matched_terms: string[]
+  decision_support_only: boolean
+}
+
 interface Requisition {
   id: string
   title: string
@@ -1185,6 +1240,11 @@ function RecruitmentPage({ user }: { user: UserSummary | null }) {
   const [interviewTime, setInterviewTime] = useState('')
   const [offerSalary, setOfferSalary] = useState('')
   const [offerExpiry, setOfferExpiry] = useState('')
+  const [resumeFile, setResumeFile] = useState<File | null>(null)
+  const [resumeApplication, setResumeApplication] = useState('')
+  const [resumeExtraction, setResumeExtraction] = useState<ResumeExtraction | null>(null)
+  const [resumeFields, setResumeFields] = useState<ResumeExtraction['extracted_fields']>({})
+  const [candidateMatches, setCandidateMatches] = useState<CandidateMatch[]>([])
   const [message, setMessage] = useState('')
   const canRecruit = user?.role === 'admin' || user?.role === 'hr' || user?.role === 'manager'
 
@@ -1245,6 +1305,35 @@ function RecruitmentPage({ user }: { user: UserSummary | null }) {
     await load()
   }
 
+  const extractResume = async (event: FormEvent) => {
+    event.preventDefault()
+    if (!resumeFile || !resumeApplication) return
+    const form = new FormData()
+    form.set('file', resumeFile)
+    const result = await apiFetch<ResumeExtraction>(`/recruitment/applicants/${resumeApplication}/resume`, { method: 'POST', body: form })
+    setResumeExtraction(result)
+    setResumeFields(result.extracted_fields)
+    setMessage('Resume suggestions extracted. Review before confirming candidate details.')
+  }
+
+  const confirmResume = async () => {
+    if (!resumeExtraction) return
+    await apiFetch(`/recruitment/resumes/${resumeExtraction.id}/confirm`, { method: 'PATCH', body: JSON.stringify({ fields: {
+      ...resumeFields,
+      skills: typeof resumeFields.skills === 'string' ? (resumeFields.skills as string).split(',').map((item) => item.trim()).filter(Boolean) : resumeFields.skills,
+      qualifications: typeof resumeFields.qualifications === 'string' ? (resumeFields.qualifications as string).split(',').map((item) => item.trim()).filter(Boolean) : resumeFields.qualifications,
+      experience_years: resumeFields.experience_years ?? null,
+    } }) })
+    setMessage('Reviewed resume fields saved to candidate record')
+    setResumeExtraction(null)
+    await load()
+  }
+
+  const matchCandidates = async () => {
+    if (!jobId) return
+    setCandidateMatches(await apiFetch<CandidateMatch[]>(`/recruitment/matching/${jobId}`))
+  }
+
   if (!canRecruit) return <section className="panel"><h3>Recruitment</h3><p className="muted">Recruitment data is available to HR, managers, and administrators.</p></section>
 
   return <div className="module-stack">
@@ -1260,6 +1349,9 @@ function RecruitmentPage({ user }: { user: UserSummary | null }) {
         <label>Candidate<input value={candidateName} onChange={(event) => setCandidateName(event.target.value)} required /></label><label>Email<input type="email" value={candidateEmail} onChange={(event) => setCandidateEmail(event.target.value)} required /></label><label>Job<select value={jobId} onChange={(event) => setJobId(event.target.value)} required><option value="">Select job</option>{jobs.filter((job) => job.status === 'open').map((job) => <option key={job.id} value={job.id}>{job.title}</option>)}</select></label><button className="secondary-btn" type="submit" disabled={!jobId}>Add candidate</button>
       </form>
       <div className="table-scroll"><table className="table"><thead><tr><th>Candidate</th><th>Email</th><th>Job</th><th>Pipeline stage</th></tr></thead><tbody>{candidates.map((candidate) => <tr key={candidate.id}><td>{candidate.candidate_name}</td><td>{candidate.email}</td><td>{jobs.find((job) => job.id === candidate.job_id)?.title || '—'}</td><td><select value={candidate.status} onChange={(event) => updateCandidate(candidate, event.target.value).catch((error) => setMessage(error.message))}><option value="applied">Applied</option><option value="screening">Screening</option><option value="interview">Interview</option><option value="offer">Offer</option><option value="hired">Hired</option><option value="rejected">Rejected</option></select></td></tr>)}</tbody></table></div>
+      <form className="workflow-form" onSubmit={(event) => extractResume(event).catch((error) => setMessage(error.message))}><label>Candidate application<select value={resumeApplication} onChange={(event) => setResumeApplication(event.target.value)} required><option value="">Select candidate</option>{candidates.map((item) => <option key={item.id} value={item.id}>{item.candidate_name}</option>)}</select></label><label>Resume<input type="file" accept=".pdf,.docx,.txt" onChange={(event) => setResumeFile(event.target.files?.[0] || null)} required /></label><button className="secondary-btn" type="submit" disabled={!resumeFile || !resumeApplication}>Extract resume fields</button><button className="text-btn" type="button" onClick={() => matchCandidates().catch((error) => setMessage(error.message))} disabled={!jobId}>Match candidates to selected job</button></form>
+      {resumeExtraction && <div className="resume-review"><strong>Review extracted suggestions</strong><div className="workflow-form"><label>Name<input value={resumeFields.candidate_name_suggestion || ''} onChange={(event) => setResumeFields((current) => ({ ...current, candidate_name_suggestion: event.target.value }))} /></label><label>Email<input value={resumeFields.email_suggestion || ''} onChange={(event) => setResumeFields((current) => ({ ...current, email_suggestion: event.target.value }))} /></label><label>Phone<input value={resumeFields.phone_suggestion || ''} onChange={(event) => setResumeFields((current) => ({ ...current, phone_suggestion: event.target.value }))} /></label><label>Experience years<input type="number" min="0" value={resumeFields.experience_years ?? ''} onChange={(event) => setResumeFields((current) => ({ ...current, experience_years: event.target.value === '' ? null : Number(event.target.value) }))} /></label><label>Skills, comma-separated<input value={Array.isArray(resumeFields.skills) ? resumeFields.skills.join(', ') : resumeFields.skills || ''} onChange={(event) => setResumeFields((current) => ({ ...current, skills: event.target.value as unknown as string[] }))} /></label><label>Qualifications, comma-separated<input value={Array.isArray(resumeFields.qualifications) ? resumeFields.qualifications.join(', ') : resumeFields.qualifications || ''} onChange={(event) => setResumeFields((current) => ({ ...current, qualifications: event.target.value as unknown as string[] }))} /></label></div><button className="primary-btn" type="button" onClick={() => confirmResume().catch((error) => setMessage(error.message))}>Confirm and update candidate</button></div>}
+      {candidateMatches.length > 0 && <div className="table-scroll"><table className="table"><thead><tr><th>Candidate</th><th>Match</th><th>Matched requirements</th><th>Decision support</th></tr></thead><tbody>{candidateMatches.map((item) => <tr key={item.application_id}><td>{item.candidate_name}</td><td>{item.score}%</td><td>{item.matched_terms.join(', ') || 'No keyword overlap'}</td><td>Human review required</td></tr>)}</tbody></table></div>}
     </section>
     <section className="panel"><div className="panel-header"><div><p className="eyebrow">Selection workflow</p><h3>Interviews and offers</h3></div></div>
       <label className="inline-field">Candidate application<select value={selectedApplication} onChange={(event) => setSelectedApplication(event.target.value)}><option value="">Select candidate</option>{candidates.map((item) => <option key={item.id} value={item.id}>{item.candidate_name} · {item.status}</option>)}</select></label>
@@ -1641,6 +1733,643 @@ function AnnouncementsPage({ user }: { user: UserSummary | null }) {
       {!items.length && <p className="muted">No announcements available.</p>}
     </section>
   </div>
+}
+
+interface OvertimeItem {
+  id: string
+  user_id: string
+  work_date: string
+  minutes: number
+  reason?: string
+  status: string
+}
+
+function OvertimePage({ user }: { user: UserSummary | null }) {
+  const [requests, setRequests] = useState<OvertimeItem[]>([])
+  const [records, setRecords] = useState<OvertimeItem[]>([])
+  const [workDate, setWorkDate] = useState(new Date().toISOString().slice(0, 10))
+  const [minutes, setMinutes] = useState('60')
+  const [reason, setReason] = useState('')
+  const [multiplier, setMultiplier] = useState('1.5')
+  const [message, setMessage] = useState('')
+  const isReviewer = user?.role === 'admin' || user?.role === 'hr' || user?.role === 'manager'
+  const isHr = user?.role === 'admin' || user?.role === 'hr'
+
+  const load = async () => {
+    const [requestItems, recordItems] = await Promise.all([
+      apiFetch<OvertimeItem[]>('/overtime/requests'),
+      apiFetch<OvertimeItem[]>('/overtime/records'),
+    ])
+    setRequests(requestItems)
+    setRecords(recordItems)
+  }
+  useEffect(() => { if (user) load().catch((error) => setMessage(error.message)) }, [user?.role])
+
+  const submitRequest = async (event: FormEvent) => {
+    event.preventDefault()
+    await apiFetch('/overtime/requests', { method: 'POST', body: JSON.stringify({ work_date: workDate, minutes: Number(minutes), reason }) })
+    setReason('')
+    setMessage('Overtime request submitted for approval')
+    await load()
+  }
+
+  const saveRule = async (event: FormEvent) => {
+    event.preventDefault()
+    await apiFetch('/overtime/rules', { method: 'POST', body: JSON.stringify({ name: 'Standard overtime', rate_multiplier: Number(multiplier) }) })
+    setMessage('Overtime rate saved')
+  }
+
+  const decide = async (id: string, request: boolean, status: 'approved' | 'rejected') => {
+    const resource = request ? 'requests' : 'records'
+    await apiFetch(`/overtime/${resource}/${id}/decision`, { method: 'PATCH', body: JSON.stringify({ status }) })
+    await load()
+  }
+
+  return <div className="module-stack">
+    <section className="panel"><div className="panel-header"><div><p className="eyebrow">Additional work hours</p><h3>Overtime</h3></div></div>
+      {message && <p className="inline-message" role="status">{message}</p>}
+      {!isReviewer && <form className="workflow-form" onSubmit={(event) => submitRequest(event).catch((error) => setMessage(error.message))}><label>Date<input type="date" value={workDate} onChange={(event) => setWorkDate(event.target.value)} required /></label><label>Minutes<input type="number" min="1" value={minutes} onChange={(event) => setMinutes(event.target.value)} required /></label><label>Reason<input value={reason} onChange={(event) => setReason(event.target.value)} required /></label><button className="primary-btn" type="submit">Request overtime</button></form>}
+      {isHr && <form className="workflow-form" onSubmit={(event) => saveRule(event).catch((error) => setMessage(error.message))}><label>Overtime multiplier<input type="number" min="0.1" step="0.1" value={multiplier} onChange={(event) => setMultiplier(event.target.value)} required /></label><button className="secondary-btn" type="submit">Save overtime rate</button></form>}
+    </section>
+    <section className="panel"><div className="panel-header"><h3>Requests</h3></div><div className="table-scroll"><table className="table"><thead><tr><th>Date</th><th>Minutes</th><th>Reason</th><th>Status</th>{isReviewer && <th>Decision</th>}</tr></thead><tbody>{requests.map((item) => <tr key={item.id}><td>{item.work_date}</td><td>{item.minutes}</td><td>{item.reason}</td><td>{item.status}</td>{isReviewer && <td>{item.status === 'pending' && <div className="row-actions"><button className="text-btn" type="button" onClick={() => decide(item.id, true, 'approved').catch((error) => setMessage(error.message))}>Approve</button><button className="text-btn danger" type="button" onClick={() => decide(item.id, true, 'rejected').catch((error) => setMessage(error.message))}>Reject</button></div>}</td>}</tr>)}</tbody></table></div></section>
+    <section className="panel"><div className="panel-header"><h3>Attendance-recorded overtime</h3></div><div className="table-scroll"><table className="table"><thead><tr><th>Date</th><th>Minutes</th><th>Status</th>{isReviewer && <th>Review</th>}</tr></thead><tbody>{records.map((item) => <tr key={item.id}><td>{item.work_date}</td><td>{item.minutes}</td><td>{item.status}</td>{isReviewer && <td>{item.status === 'pending_approval' && <div className="row-actions"><button className="text-btn" type="button" onClick={() => decide(item.id, false, 'approved').catch((error) => setMessage(error.message))}>Approve</button><button className="text-btn danger" type="button" onClick={() => decide(item.id, false, 'rejected').catch((error) => setMessage(error.message))}>Reject</button></div>}</td>}</tr>)}</tbody></table></div></section>
+  </div>
+}
+
+interface TaxDeclaration {
+  id: string
+  tax_year: number
+  declared_investment_amount: number
+  status: string
+}
+
+interface TaxProof {
+  id: string
+  declaration_id: string
+  category: string
+  amount: number
+  status: string
+  file_name: string
+}
+
+interface InsurancePolicy {
+  id: string
+  name: string
+  coverage_amount: number
+  active: boolean
+}
+
+interface InsuranceEnrollment {
+  id: string
+  policy_id: string
+  status: string
+}
+
+interface BenefitItem {
+  id: string
+  status: string
+  amount?: number
+  description?: string
+}
+
+function BenefitsPage({ user }: { user: UserSummary | null }) {
+  const [configs, setConfigs] = useState<{ id: string; kind: string; name: string }[]>([])
+  const [declarations, setDeclarations] = useState<TaxDeclaration[]>([])
+  const [proofs, setProofs] = useState<TaxProof[]>([])
+  const [policies, setPolicies] = useState<InsurancePolicy[]>([])
+  const [enrollments, setEnrollments] = useState<InsuranceEnrollment[]>([])
+  const [dependents, setDependents] = useState<BenefitItem[]>([])
+  const [claims, setClaims] = useState<BenefitItem[]>([])
+  const [form16, setForm16] = useState<{ id: string; tax_year: number }[]>([])
+  const [employees, setEmployees] = useState<Employee[]>([])
+  const [selectedEmployee, setSelectedEmployee] = useState('')
+  const [selectedPolicy, setSelectedPolicy] = useState('')
+  const [selectedEnrollment, setSelectedEnrollment] = useState('')
+  const [selectedDeclaration, setSelectedDeclaration] = useState('')
+  const [proofFile, setProofFile] = useState<File | null>(null)
+  const [proofAmount, setProofAmount] = useState('')
+  const [proofCategory, setProofCategory] = useState('Investment')
+  const [taxYear, setTaxYear] = useState(String(new Date().getFullYear()))
+  const [declaredAmount, setDeclaredAmount] = useState('')
+  const [pfNumber, setPfNumber] = useState('')
+  const [esiNumber, setEsiNumber] = useState('')
+  const [pan, setPan] = useState('')
+  const [configKind, setConfigKind] = useState('pf')
+  const [employeeRate, setEmployeeRate] = useState('')
+  const [employerRate, setEmployerRate] = useState('')
+  const [wageCap, setWageCap] = useState('')
+  const [policyName, setPolicyName] = useState('')
+  const [coverage, setCoverage] = useState('')
+  const [dependentName, setDependentName] = useState('')
+  const [dependentRelation, setDependentRelation] = useState('')
+  const [claimAmount, setClaimAmount] = useState('')
+  const [claimDescription, setClaimDescription] = useState('')
+  const [message, setMessage] = useState('')
+  const isHr = user?.role === 'admin' || user?.role === 'hr'
+
+  const load = async () => {
+    const [info, declarationItems, proofItems, policyItems, enrollmentItems, dependentItems, claimItems, form16Items] = await Promise.all([
+      apiFetch<Record<string, unknown>>('/statutory/me'),
+      apiFetch<TaxDeclaration[]>('/tax/declarations'),
+      apiFetch<TaxProof[]>('/tax/proofs'),
+      apiFetch<InsurancePolicy[]>('/insurance/policies'),
+      apiFetch<InsuranceEnrollment[]>('/insurance/enrollments'),
+      apiFetch<BenefitItem[]>('/insurance/dependents'),
+      apiFetch<BenefitItem[]>('/insurance/claims'),
+      apiFetch<{ id: string; tax_year: number }[]>('/tax/form16'),
+    ])
+    setPfNumber(String(info.pf_member_id || ''))
+    setEsiNumber(String(info.esi_number || ''))
+    setPan(String(info.pan || ''))
+    setDeclarations(declarationItems)
+    setProofs(proofItems)
+    setPolicies(policyItems)
+    setEnrollments(enrollmentItems)
+    setDependents(dependentItems)
+    setClaims(claimItems)
+    setForm16(form16Items)
+    if (!selectedPolicy && policyItems.length) setSelectedPolicy(policyItems[0].id)
+    if (!selectedEnrollment && enrollmentItems.length) setSelectedEnrollment(enrollmentItems[0].id)
+    if (!selectedDeclaration && declarationItems.length) setSelectedDeclaration(declarationItems[0].id)
+    if (isHr) {
+      const [configItems, employeePage] = await Promise.all([
+        apiFetch<typeof configs>('/statutory/config'),
+        apiFetch<{ items: Employee[] }>('/employees/'),
+      ])
+      setConfigs(configItems)
+      setEmployees(employeePage.items)
+      if (!selectedEmployee && employeePage.items.length) setSelectedEmployee(employeePage.items[0].email)
+    }
+  }
+  useEffect(() => { if (user) load().catch((error) => setMessage(error.message)) }, [user?.role])
+
+  const saveStatutoryInfo = async (event: FormEvent) => {
+    event.preventDefault()
+    await apiFetch('/statutory/me', { method: 'PUT', body: JSON.stringify({ pf_member_id: pfNumber, esi_number: esiNumber, pan }) })
+    setMessage('Statutory information saved')
+  }
+  const saveConfig = async (event: FormEvent) => {
+    event.preventDefault()
+    await apiFetch('/statutory/config', { method: 'POST', body: JSON.stringify({ kind: configKind, name: configKind.toUpperCase(), employee_rate: Number(employeeRate), employer_rate: Number(employerRate), wage_cap: wageCap ? Number(wageCap) : undefined }) })
+    setEmployeeRate('')
+    setEmployerRate('')
+    await load()
+  }
+  const submitDeclaration = async (event: FormEvent) => {
+    event.preventDefault()
+    await apiFetch('/tax/declarations', { method: 'POST', body: JSON.stringify({ tax_year: Number(taxYear), declared_investment_amount: Number(declaredAmount), tax_regime: 'default' }) })
+    setDeclaredAmount('')
+    setMessage('Tax declaration submitted')
+    await load()
+  }
+  const uploadProof = async (event: FormEvent) => {
+    event.preventDefault()
+    if (!proofFile || !selectedDeclaration) return
+    const form = new FormData()
+    form.set('file', proofFile)
+    form.set('declaration_id', selectedDeclaration)
+    form.set('tax_year', taxYear)
+    form.set('amount', proofAmount)
+    form.set('category', proofCategory)
+    await apiFetch('/tax/proofs', { method: 'POST', body: form })
+    setProofFile(null)
+    setMessage('Proof uploaded for review')
+    await load()
+  }
+  const createPolicy = async (event: FormEvent) => {
+    event.preventDefault()
+    await apiFetch('/insurance/policies', { method: 'POST', body: JSON.stringify({ name: policyName, coverage_amount: Number(coverage) }) })
+    setPolicyName('')
+    setCoverage('')
+    await load()
+  }
+  const enroll = async () => {
+    await apiFetch('/insurance/enrollments', { method: 'POST', body: JSON.stringify({ policy_id: selectedPolicy }) })
+    await load()
+  }
+  const addDependent = async (event: FormEvent) => {
+    event.preventDefault()
+    await apiFetch('/insurance/dependents', { method: 'POST', body: JSON.stringify({ enrollment_id: selectedEnrollment, name: dependentName, relationship: dependentRelation }) })
+    setDependentName('')
+    setDependentRelation('')
+    await load()
+  }
+  const submitClaim = async (event: FormEvent) => {
+    event.preventDefault()
+    await apiFetch('/insurance/claims', { method: 'POST', body: JSON.stringify({ enrollment_id: selectedEnrollment, amount: Number(claimAmount), description: claimDescription }) })
+    setClaimAmount('')
+    setClaimDescription('')
+    await load()
+  }
+  const decide = async (path: string, id: string, status: 'approved' | 'rejected') => {
+    await apiFetch(`${path}/${id}/decision`, { method: 'PATCH', body: JSON.stringify({ status }) })
+    await load()
+  }
+  const generateForm16 = async (event: FormEvent) => {
+    event.preventDefault()
+    await apiFetch('/tax/form16/generate', { method: 'POST', body: JSON.stringify({ employee_email: selectedEmployee, tax_year: Number(taxYear) }) })
+    await load()
+  }
+
+  return <div className="module-stack">
+    <section className="panel"><div className="panel-header"><div><p className="eyebrow">Statutory information</p><h3>Benefits & Tax</h3></div></div>
+      {message && <p className="inline-message" role="status">{message}</p>}
+      <form className="workflow-form" onSubmit={(event) => saveStatutoryInfo(event).catch((error) => setMessage(error.message))}><label>PF member ID<input value={pfNumber} onChange={(event) => setPfNumber(event.target.value)} /></label><label>ESI number<input value={esiNumber} onChange={(event) => setEsiNumber(event.target.value)} /></label><label>PAN<input value={pan} onChange={(event) => setPan(event.target.value.toUpperCase())} maxLength={10} /></label><button className="secondary-btn" type="submit">Save my information</button></form>
+      {isHr && <><form className="workflow-form" onSubmit={(event) => saveConfig(event).catch((error) => setMessage(error.message))}><label>Contribution<select value={configKind} onChange={(event) => setConfigKind(event.target.value)}><option value="pf">PF</option><option value="esi">ESI</option></select></label><label>Employee rate %<input type="number" min="0" max="100" step="0.01" value={employeeRate} onChange={(event) => setEmployeeRate(event.target.value)} required /></label><label>Employer rate %<input type="number" min="0" max="100" step="0.01" value={employerRate} onChange={(event) => setEmployerRate(event.target.value)} required /></label><label>Wage cap<input type="number" min="0" value={wageCap} onChange={(event) => setWageCap(event.target.value)} /></label><button className="primary-btn" type="submit">Save configuration</button></form><p className="muted">Configured contributions: {configs.map((item) => `${item.kind.toUpperCase()} · ${item.name}`).join(', ') || 'None'}</p></>}
+    </section>
+    <section className="panel"><div className="panel-header"><h3>Tax declarations and investment proofs</h3></div>
+      <form className="workflow-form" onSubmit={(event) => submitDeclaration(event).catch((error) => setMessage(error.message))}><label>Tax year<input type="number" min="2000" max="2100" value={taxYear} onChange={(event) => setTaxYear(event.target.value)} required /></label><label>Declared investments<input type="number" min="0" step="0.01" value={declaredAmount} onChange={(event) => setDeclaredAmount(event.target.value)} required /></label><button className="secondary-btn" type="submit">Submit declaration</button></form>
+      <div className="table-scroll"><table className="table"><thead><tr><th>Tax year</th><th>Declared</th><th>Status</th>{isHr && <th>Review</th>}</tr></thead><tbody>{declarations.map((item) => <tr key={item.id}><td>{item.tax_year}</td><td>{item.declared_investment_amount}</td><td>{item.status}</td>{isHr && <td>{item.status === 'submitted' && <div className="row-actions"><button className="text-btn" type="button" onClick={() => decide('/tax/declarations', item.id, 'approved').catch((error) => setMessage(error.message))}>Approve</button><button className="text-btn danger" type="button" onClick={() => decide('/tax/declarations', item.id, 'rejected').catch((error) => setMessage(error.message))}>Reject</button></div>}</td>}</tr>)}</tbody></table></div>
+      <form className="workflow-form" onSubmit={(event) => uploadProof(event).catch((error) => setMessage(error.message))}><label>Declaration<select value={selectedDeclaration} onChange={(event) => setSelectedDeclaration(event.target.value)} required><option value="">Select declaration</option>{declarations.map((item) => <option key={item.id} value={item.id}>{item.tax_year} · {item.status}</option>)}</select></label><label>Proof category<input value={proofCategory} onChange={(event) => setProofCategory(event.target.value)} required /></label><label>Amount<input type="number" min="0.01" step="0.01" value={proofAmount} onChange={(event) => setProofAmount(event.target.value)} required /></label><label>Document<input type="file" accept=".pdf,.png,.jpg,.jpeg" onChange={(event) => setProofFile(event.target.files?.[0] || null)} required /></label><button className="primary-btn" type="submit" disabled={!proofFile || !selectedDeclaration}>Upload proof</button></form>
+      <div className="table-scroll"><table className="table"><thead><tr><th>Proof</th><th>Amount</th><th>Status</th>{isHr && <th>Review</th>}</tr></thead><tbody>{proofs.map((item) => <tr key={item.id}><td><button className="text-btn" type="button" onClick={() => apiDownload(`/tax/proofs/${item.id}/download`, item.file_name).catch((error) => setMessage(error.message))}>{item.category}</button></td><td>{item.amount}</td><td>{item.status}</td>{isHr && <td>{item.status === 'pending_verification' && <div className="row-actions"><button className="text-btn" type="button" onClick={() => decide('/tax/proofs', item.id, 'approved').catch((error) => setMessage(error.message))}>Approve</button><button className="text-btn danger" type="button" onClick={() => decide('/tax/proofs', item.id, 'rejected').catch((error) => setMessage(error.message))}>Reject</button></div>}</td>}</tr>)}</tbody></table></div>
+      {isHr && <form className="workflow-form" onSubmit={(event) => generateForm16(event).catch((error) => setMessage(error.message))}><label>Employee<select value={selectedEmployee} onChange={(event) => setSelectedEmployee(event.target.value)}>{employees.map((item) => <option key={item.id} value={item.email}>{item.first_name} {item.last_name}</option>)}</select></label><button className="secondary-btn" type="submit">Generate Form 16</button></form>}
+      <ul className="list-stack">{form16.map((item) => <li key={item.id}><span>Form 16 · {item.tax_year}</span><button className="text-btn" type="button" onClick={() => apiDownload(`/tax/form16/${item.id}/download`, `form16-${item.tax_year}.csv`).catch((error) => setMessage(error.message))}>Download</button></li>)}</ul>
+    </section>
+    <section className="panel"><div className="panel-header"><h3>Insurance</h3></div>
+      {isHr && <form className="workflow-form" onSubmit={(event) => createPolicy(event).catch((error) => setMessage(error.message))}><label>Policy name<input value={policyName} onChange={(event) => setPolicyName(event.target.value)} required /></label><label>Coverage amount<input type="number" min="0" value={coverage} onChange={(event) => setCoverage(event.target.value)} required /></label><button className="secondary-btn" type="submit">Create policy</button></form>}
+      <div className="workflow-form"><label>Policy<select value={selectedPolicy} onChange={(event) => setSelectedPolicy(event.target.value)}><option value="">Select policy</option>{policies.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.coverage_amount}</option>)}</select></label><button className="primary-btn" type="button" disabled={!selectedPolicy} onClick={() => enroll().catch((error) => setMessage(error.message))}>Enroll me</button></div>
+      <form className="workflow-form" onSubmit={(event) => addDependent(event).catch((error) => setMessage(error.message))}><label>Enrollment<select value={selectedEnrollment} onChange={(event) => setSelectedEnrollment(event.target.value)}><option value="">Select enrollment</option>{enrollments.map((item) => <option key={item.id} value={item.id}>{policies.find((policy) => policy.id === item.policy_id)?.name || item.policy_id}</option>)}</select></label><label>Dependent name<input value={dependentName} onChange={(event) => setDependentName(event.target.value)} required /></label><label>Relationship<input value={dependentRelation} onChange={(event) => setDependentRelation(event.target.value)} required /></label><button className="secondary-btn" type="submit" disabled={!selectedEnrollment}>Add dependent</button></form>
+      <form className="workflow-form" onSubmit={(event) => submitClaim(event).catch((error) => setMessage(error.message))}><label>Claim amount<input type="number" min="0.01" step="0.01" value={claimAmount} onChange={(event) => setClaimAmount(event.target.value)} required /></label><label>Claim description<input value={claimDescription} onChange={(event) => setClaimDescription(event.target.value)} required /></label><button className="secondary-btn" type="submit" disabled={!selectedEnrollment}>Submit insurance claim</button></form>
+      <div className="table-scroll"><table className="table"><thead><tr><th>Claim</th><th>Amount</th><th>Status</th>{isHr && <th>Decision</th>}</tr></thead><tbody>{claims.map((item) => <tr key={item.id}><td>{item.description}</td><td>{item.amount}</td><td>{item.status}</td>{isHr && <td>{item.status === 'submitted' && <div className="row-actions"><button className="text-btn" type="button" onClick={() => decide('/insurance/claims', item.id, 'approved').catch((error) => setMessage(error.message))}>Approve</button><button className="text-btn danger" type="button" onClick={() => decide('/insurance/claims', item.id, 'rejected').catch((error) => setMessage(error.message))}>Reject</button></div>}</td>}</tr>)}</tbody></table></div>
+      <p className="muted">Dependents on file: {dependents.length}</p>
+    </section>
+  </div>
+}
+
+interface DutyRequest {
+  id: string
+  user_id: string
+  duty_type: string
+  start_date: string
+  end_date: string
+  location: string
+  purpose: string
+  status: string
+}
+
+interface IssuedLetter {
+  id: string
+  user_id: string
+  title: string
+  letter_type: string
+  rendered_content: string
+  signature_status?: string
+  signature_request_id?: string
+}
+
+interface ExitRecord {
+  id: string
+  user_id: string
+  last_working_day: string
+  reason: string
+  status: string
+}
+
+interface ExitClearance {
+  id: string
+  exit_request_id: string
+  department: string
+  status: string
+}
+
+function LifecyclePage({ user }: { user: UserSummary | null }) {
+  const [duties, setDuties] = useState<DutyRequest[]>([])
+  const [letters, setLetters] = useState<IssuedLetter[]>([])
+  const [signatures, setSignatures] = useState<{ id: string; letter_id: string; status: string }[]>([])
+  const [exitRequests, setExitRequests] = useState<ExitRecord[]>([])
+  const [clearances, setClearances] = useState<ExitClearance[]>([])
+  const [templates, setTemplates] = useState<{ id: string; name: string; variables: string[] }[]>([])
+  const [employees, setEmployees] = useState<Employee[]>([])
+  const [dutyType, setDutyType] = useState('field')
+  const [dutyStart, setDutyStart] = useState(new Date().toISOString().slice(0, 10))
+  const [dutyEnd, setDutyEnd] = useState(new Date().toISOString().slice(0, 10))
+  const [dutyLocation, setDutyLocation] = useState('')
+  const [dutyPurpose, setDutyPurpose] = useState('')
+  const [templateName, setTemplateName] = useState('')
+  const [templateType, setTemplateType] = useState('employment')
+  const [templateBody, setTemplateBody] = useState('This confirms {{employee_name}} is employed by the organization.')
+  const [templateVariable, setTemplateVariable] = useState('employee_name')
+  const [templateId, setTemplateId] = useState('')
+  const [employeeEmail, setEmployeeEmail] = useState('')
+  const [letterValue, setLetterValue] = useState('')
+  const [reportType, setReportType] = useState('attendance')
+  const [reportStart, setReportStart] = useState('')
+  const [reportEnd, setReportEnd] = useState('')
+  const [statusFilter, setStatusFilter] = useState('')
+  const [lastWorkingDay, setLastWorkingDay] = useState(new Date().toISOString().slice(0, 10))
+  const [exitReason, setExitReason] = useState('')
+  const [settlementRequestId, setSettlementRequestId] = useState('')
+  const [settlementPreview, setSettlementPreview] = useState<Record<string, unknown> | null>(null)
+  const [gratuityAmount, setGratuityAmount] = useState('0')
+  const [leaveSettlement, setLeaveSettlement] = useState('0')
+  const [message, setMessage] = useState('')
+  const canReview = user?.role === 'admin' || user?.role === 'hr' || user?.role === 'manager'
+  const isHr = user?.role === 'admin' || user?.role === 'hr'
+
+  const load = async () => {
+    const [dutyItems, letterItems, signatureItems, exitItems, clearanceItems] = await Promise.all([
+      apiFetch<DutyRequest[]>('/duty-requests'),
+      apiFetch<IssuedLetter[]>('/letters'),
+      apiFetch<{ id: string; letter_id: string; status: string }[]>('/signatures'),
+      apiFetch<ExitRecord[]>('/exit/requests'),
+      apiFetch<ExitClearance[]>('/exit/clearances'),
+    ])
+    setDuties(dutyItems)
+    setLetters(letterItems)
+    setSignatures(signatureItems)
+    setExitRequests(exitItems)
+    setClearances(clearanceItems)
+    if (!settlementRequestId && exitItems.length) setSettlementRequestId(exitItems[0].id)
+    if (isHr) {
+      const [templateItems, employeePage] = await Promise.all([
+        apiFetch<typeof templates>('/letter-templates'),
+        apiFetch<{ items: Employee[] }>('/employees/'),
+      ])
+      setTemplates(templateItems)
+      setEmployees(employeePage.items)
+      if (!templateId && templateItems.length) setTemplateId(templateItems[0].id)
+      if (!employeeEmail && employeePage.items.length) setEmployeeEmail(employeePage.items[0].email)
+    }
+  }
+  useEffect(() => { if (user) load().catch((error) => setMessage(error.message)) }, [user?.role])
+
+  const submitDuty = async (event: FormEvent) => {
+    event.preventDefault()
+    await apiFetch('/duty-requests', { method: 'POST', body: JSON.stringify({ duty_type: dutyType, start_date: dutyStart, end_date: dutyEnd, location: dutyLocation, purpose: dutyPurpose }) })
+    setDutyPurpose('')
+    setMessage('Duty request submitted')
+    await load()
+  }
+  const decideDuty = async (item: DutyRequest, status: 'approved' | 'rejected') => {
+    await apiFetch(`/duty-requests/${item.id}/decision`, { method: 'PATCH', body: JSON.stringify({ status }) })
+    await load()
+  }
+  const recordLocation = async (item: DutyRequest) => {
+    const position = await new Promise<GeolocationPosition>((resolve, reject) => navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: true, timeout: 8000 }))
+    await apiFetch(`/duty-requests/${item.id}/location-ping`, { method: 'POST', body: JSON.stringify({ latitude: position.coords.latitude, longitude: position.coords.longitude }) })
+    setMessage('Field-duty location check-in recorded')
+  }
+  const createTemplate = async (event: FormEvent) => {
+    event.preventDefault()
+    await apiFetch('/letter-templates', { method: 'POST', body: JSON.stringify({ name: templateName, letter_type: templateType, body: templateBody, variables: [templateVariable] }) })
+    setTemplateName('')
+    await load()
+  }
+  const issueLetter = async (event: FormEvent) => {
+    event.preventDefault()
+    await apiFetch('/letters/issue', { method: 'POST', body: JSON.stringify({ template_id: templateId, employee_email: employeeEmail, values: { [templateVariable]: letterValue } }) })
+    setMessage('Letter issued')
+    await load()
+  }
+  const requestSignature = async (letter: IssuedLetter) => {
+    await apiFetch(`/letters/${letter.id}/signature-requests`, { method: 'POST', body: JSON.stringify({ signer_email: employeeEmail }) })
+    setMessage('Signature requested')
+    await load()
+  }
+  const downloadReport = async (event: FormEvent) => {
+    event.preventDefault()
+    const filters = { start_date: reportStart || undefined, end_date: reportEnd || undefined, status: statusFilter || undefined }
+    const query = new URLSearchParams()
+    Object.entries(filters).forEach(([key, value]) => { if (value) query.set(key, value) })
+    const token = localStorage.getItem('hrms_token')
+    const response = await fetch(`http://localhost:8000/api/reports/${reportType}?${query.toString()}`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(filters) })
+    if (!response.ok) throw new Error('Report export failed')
+    const blob = await response.blob()
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `${reportType}-report.csv`
+    link.click()
+    URL.revokeObjectURL(url)
+  }
+  const submitExitRequest = async (event: FormEvent) => {
+    event.preventDefault()
+    await apiFetch('/exit/requests', { method: 'POST', body: JSON.stringify({ last_working_day: lastWorkingDay, reason: exitReason }) })
+    setExitReason('')
+    setMessage('Exit request submitted')
+    await load()
+  }
+  const decideExit = async (item: ExitRecord, status: 'approved' | 'rejected') => {
+    await apiFetch(`/exit/requests/${item.id}/decision`, { method: 'PATCH', body: JSON.stringify({ status }) })
+    await load()
+  }
+  const updateClearance = async (item: ExitClearance, status: 'cleared' | 'blocked') => {
+    await apiFetch(`/exit/clearances/${item.id}`, { method: 'PATCH', body: JSON.stringify({ status }) })
+    await load()
+  }
+  const previewSettlement = async () => {
+    setSettlementPreview(await apiFetch<Record<string, unknown>>('/exit/settlements/preview', { method: 'POST', body: JSON.stringify({ exit_request_id: settlementRequestId, gratuity_amount: Number(gratuityAmount), leave_settlement: Number(leaveSettlement) }) }))
+  }
+  const finalizeSettlement = async () => {
+    await apiFetch('/exit/settlements', { method: 'POST', body: JSON.stringify({ exit_request_id: settlementRequestId, gratuity_amount: Number(gratuityAmount), leave_settlement: Number(leaveSettlement) }) })
+    setMessage('Final settlement finalized')
+    setSettlementPreview(null)
+  }
+
+  return <div className="module-stack">
+    <section className="panel"><div className="panel-header"><div><p className="eyebrow">Office and field work</p><h3>Duty requests</h3></div></div>
+      {message && <p className="inline-message" role="status">{message}</p>}
+      <form className="workflow-form" onSubmit={(event) => submitDuty(event).catch((error) => setMessage(error.message))}><label>Duty type<select value={dutyType} onChange={(event) => setDutyType(event.target.value)}><option value="field">Field duty</option><option value="office">Office duty</option></select></label><label>From<input type="date" value={dutyStart} onChange={(event) => setDutyStart(event.target.value)} required /></label><label>To<input type="date" value={dutyEnd} onChange={(event) => setDutyEnd(event.target.value)} required /></label><label>Location<input value={dutyLocation} onChange={(event) => setDutyLocation(event.target.value)} required /></label><label>Purpose<input value={dutyPurpose} onChange={(event) => setDutyPurpose(event.target.value)} required /></label><button className="primary-btn" type="submit">Request duty</button></form>
+      <div className="table-scroll"><table className="table"><thead><tr><th>Type</th><th>Dates</th><th>Location</th><th>Purpose</th><th>Status</th><th>Actions</th></tr></thead><tbody>{duties.map((item) => <tr key={item.id}><td>{item.duty_type}</td><td>{item.start_date} – {item.end_date}</td><td>{item.location}</td><td>{item.purpose}</td><td>{item.status}</td><td className="row-actions">{canReview && item.status === 'pending_approval' && <><button className="text-btn" type="button" onClick={() => decideDuty(item, 'approved').catch((error) => setMessage(error.message))}>Approve</button><button className="text-btn danger" type="button" onClick={() => decideDuty(item, 'rejected').catch((error) => setMessage(error.message))}>Reject</button></>}{item.status === 'approved' && item.duty_type === 'field' && item.user_id === user?.id && <button className="text-btn" type="button" onClick={() => recordLocation(item).catch((error) => setMessage(error.message))}>Location check-in</button>}</td></tr>)}</tbody></table></div>
+    </section>
+    <section className="panel"><div className="panel-header"><div><p className="eyebrow">Employee letters</p><h3>Letters and signatures</h3></div></div>
+      {isHr && <><form className="workflow-form" onSubmit={(event) => createTemplate(event).catch((error) => setMessage(error.message))}><label>Template name<input value={templateName} onChange={(event) => setTemplateName(event.target.value)} required /></label><label>Letter type<select value={templateType} onChange={(event) => setTemplateType(event.target.value)}><option value="employment">Employment</option><option value="offer">Offer</option><option value="salary">Salary</option><option value="experience">Experience</option><option value="relieving">Relieving</option></select></label><label>Variable<input value={templateVariable} onChange={(event) => setTemplateVariable(event.target.value)} required /></label><label>Body<textarea value={templateBody} onChange={(event) => setTemplateBody(event.target.value)} rows={3} required /></label><button className="secondary-btn" type="submit">Create template</button></form>
+        <form className="workflow-form" onSubmit={(event) => issueLetter(event).catch((error) => setMessage(error.message))}><label>Template<select value={templateId} onChange={(event) => setTemplateId(event.target.value)}><option value="">Select template</option>{templates.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><label>Employee<select value={employeeEmail} onChange={(event) => setEmployeeEmail(event.target.value)}>{employees.map((item) => <option key={item.id} value={item.email}>{item.first_name} {item.last_name}</option>)}</select></label><label>Employee name value<input value={letterValue} onChange={(event) => setLetterValue(event.target.value)} required /></label><button className="primary-btn" type="submit" disabled={!templateId}>Issue letter</button></form></>}
+      <ul className="list-stack">{letters.map((item) => { const signature = signatures.find((request) => request.letter_id === item.id); return <li key={item.id}><span><strong>{item.title}</strong><small className="table-note">{item.rendered_content}</small></span><div className="row-actions">{isHr && <button className="text-btn" type="button" onClick={() => requestSignature(item).catch((error) => setMessage(error.message))}>Request signature</button>}{signature?.status === 'requested' && item.user_id === user?.id && <button className="text-btn" type="button" onClick={() => apiFetch(`/signatures/${signature.id}/sign`, { method: 'PATCH', body: JSON.stringify({ confirmed: true }) }).then(load).catch((error) => setMessage(error.message))}>Sign</button>}<span className="muted">{signature?.status || 'No signature request'}</span></div></li>})}</ul>
+    </section>
+    <section className="panel"><div className="panel-header"><div><p className="eyebrow">Employee lifecycle</p><h3>Exit management</h3></div></div>
+      {!isHr && <form className="workflow-form" onSubmit={(event) => submitExitRequest(event).catch((error) => setMessage(error.message))}><label>Last working day<input type="date" value={lastWorkingDay} onChange={(event) => setLastWorkingDay(event.target.value)} required /></label><label>Reason<input value={exitReason} onChange={(event) => setExitReason(event.target.value)} required /></label><button className="primary-btn" type="submit">Submit exit request</button></form>}
+      <div className="table-scroll"><table className="table"><thead><tr><th>Last day</th><th>Reason</th><th>Status</th>{isHr && <th>Decision</th>}</tr></thead><tbody>{exitRequests.map((item) => <tr key={item.id}><td>{item.last_working_day}</td><td>{item.reason}</td><td>{item.status}</td>{isHr && <td>{item.status === 'submitted' && <div className="row-actions"><button className="text-btn" type="button" onClick={() => decideExit(item, 'approved').catch((error) => setMessage(error.message))}>Approve</button><button className="text-btn danger" type="button" onClick={() => decideExit(item, 'rejected').catch((error) => setMessage(error.message))}>Reject</button></div>}</td>}</tr>)}</tbody></table></div>
+      {isHr && <><div className="table-scroll"><table className="table"><thead><tr><th>Department clearance</th><th>Exit request</th><th>Status</th><th>Action</th></tr></thead><tbody>{clearances.map((item) => <tr key={item.id}><td>{item.department}</td><td>{item.exit_request_id}</td><td>{item.status}</td><td>{item.status === 'pending' && <div className="row-actions"><button className="text-btn" type="button" onClick={() => updateClearance(item, 'cleared').catch((error) => setMessage(error.message))}>Clear</button><button className="text-btn danger" type="button" onClick={() => updateClearance(item, 'blocked').catch((error) => setMessage(error.message))}>Block</button></div>}</td></tr>)}</tbody></table></div>
+        <div className="workflow-form"><label>Approved exit request<select value={settlementRequestId} onChange={(event) => setSettlementRequestId(event.target.value)}>{exitRequests.filter((item) => item.status === 'approved').map((item) => <option key={item.id} value={item.id}>{item.last_working_day} · {item.id}</option>)}</select></label><label>Gratuity<input type="number" min="0" step="0.01" value={gratuityAmount} onChange={(event) => setGratuityAmount(event.target.value)} /></label><label>Leave settlement<input type="number" min="0" step="0.01" value={leaveSettlement} onChange={(event) => setLeaveSettlement(event.target.value)} /></label><button className="secondary-btn" type="button" onClick={() => previewSettlement().catch((error) => setMessage(error.message))} disabled={!settlementRequestId}>Preview settlement</button></div>
+        {settlementPreview && <div className="run-preview"><strong>Net total: {String(settlementPreview.net_total)}</strong><span>Salary: {String(settlementPreview.salary_proration)}</span><span>Expenses: {String(settlementPreview.reimbursements)}</span><span>Approved overtime: {String(settlementPreview.approved_overtime_minutes)} min</span><span>Clearances complete: {String(settlementPreview.clearances_complete)}</span><button className="primary-btn" type="button" disabled={!settlementPreview.clearances_complete} onClick={() => finalizeSettlement().catch((error) => setMessage(error.message))}>Finalize F&F</button></div>}</>}
+    </section>
+    {isHr && <section className="panel"><div className="panel-header"><div><p className="eyebrow">Data export</p><h3>HR reports</h3></div></div><form className="workflow-form" onSubmit={(event) => downloadReport(event).catch((error) => setMessage(error.message))}><label>Report<select value={reportType} onChange={(event) => setReportType(event.target.value)}>{['employees', 'attendance', 'leave', 'expenses', 'payroll', 'overtime', 'recruitment', 'onboarding', 'performance', 'documents', 'pf', 'esi', 'tax', 'insurance', 'exit'].map((item) => <option key={item} value={item}>{item}</option>)}</select></label><label>From<input type="date" value={reportStart} onChange={(event) => setReportStart(event.target.value)} /></label><label>To<input type="date" value={reportEnd} onChange={(event) => setReportEnd(event.target.value)} /></label><label>Status<input value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)} /></label><button className="primary-btn" type="submit">Export CSV</button></form></section>}
+  </div>
+}
+
+interface PrivacyItem {
+  id: string
+  purpose?: string
+  request_type?: string
+  status?: string
+  description?: string
+}
+
+function CompliancePage({ user }: { user: UserSummary | null }) {
+  const [consents, setConsents] = useState<PrivacyItem[]>([])
+  const [requests, setRequests] = useState<PrivacyItem[]>([])
+  const [poshItems, setPoshItems] = useState<{ id: string; status: string; incident_date?: string }[]>([])
+  const [employees, setEmployees] = useState<Employee[]>([])
+  const [committeeId, setCommitteeId] = useState('')
+  const [policyVersion, setPolicyVersion] = useState('current')
+  const [purpose, setPurpose] = useState('benefits_processing')
+  const [requestType, setRequestType] = useState('access')
+  const [requestDescription, setRequestDescription] = useState('')
+  const [incidentDate, setIncidentDate] = useState(new Date().toISOString().slice(0, 10))
+  const [complaint, setComplaint] = useState('')
+  const [respondent, setRespondent] = useState('')
+  const [message, setMessage] = useState('')
+  const [restrictedAccess, setRestrictedAccess] = useState(false)
+  const isAdmin = user?.role === 'admin'
+
+  const load = async () => {
+    const [consentItems, requestItems] = await Promise.all([
+      apiFetch<PrivacyItem[]>('/privacy/consents'),
+      apiFetch<PrivacyItem[]>('/privacy/requests'),
+    ])
+    setConsents(consentItems)
+    setRequests(requestItems)
+    try {
+      const cases = await apiFetch<{ id: string; status: string; incident_date?: string }[]>('/posh/complaints')
+      setPoshItems(cases)
+      setRestrictedAccess(false)
+    } catch {
+      setPoshItems([])
+      setRestrictedAccess(true)
+    }
+    if (isAdmin) {
+      const employeePage = await apiFetch<{ items: Employee[] }>('/employees/')
+      setEmployees(employeePage.items)
+      if (!committeeId && employeePage.items.length) setCommitteeId(employeePage.items[0].email)
+    }
+  }
+  useEffect(() => { if (user) load().catch((error) => setMessage(error.message)) }, [user?.role])
+
+  const acknowledge = async (event: FormEvent) => {
+    event.preventDefault()
+    await apiFetch('/posh/acknowledgements', { method: 'POST', body: JSON.stringify({ policy_version: policyVersion }) })
+    setMessage('POSH policy acknowledgement recorded')
+    await load()
+  }
+  const addCommitteeMember = async (event: FormEvent) => {
+    event.preventDefault()
+    const employee = employees.find((item) => item.email === committeeId)
+    if (!employee) return
+    await apiFetch('/posh/committee', { method: 'POST', body: JSON.stringify({ user_id: employee.id }) })
+    setMessage('Committee member added')
+  }
+  const submitComplaint = async (event: FormEvent) => {
+    event.preventDefault()
+    await apiFetch('/posh/complaints', { method: 'POST', body: JSON.stringify({ incident_date: incidentDate, description: complaint, respondent_name: respondent, confidentiality_requested: true }) })
+    setComplaint('')
+    setRespondent('')
+    setMessage('Confidential complaint submitted')
+    await load()
+  }
+  const updateCase = async (id: string, status: string) => {
+    await apiFetch(`/posh/complaints/${id}/status`, { method: 'PATCH', body: JSON.stringify({ status }) })
+    await load()
+  }
+  const recordConsent = async (event: FormEvent) => {
+    event.preventDefault()
+    await apiFetch('/privacy/consents', { method: 'POST', body: JSON.stringify({ purpose, granted: true, policy_version: policyVersion }) })
+    await load()
+  }
+  const submitPrivacyRequest = async (event: FormEvent) => {
+    event.preventDefault()
+    await apiFetch('/privacy/requests', { method: 'POST', body: JSON.stringify({ request_type: requestType, description: requestDescription }) })
+    setRequestDescription('')
+    await load()
+  }
+  const decidePrivacyRequest = async (item: PrivacyItem, status: string) => {
+    await apiFetch(`/privacy/requests/${item.id}/decision`, { method: 'PATCH', body: JSON.stringify({ status, response: 'Reviewed by HR administrator' }) })
+    await load()
+  }
+
+  return <div className="module-stack">
+    <section className="panel"><div className="panel-header"><div><p className="eyebrow">Restricted case handling</p><h3>POSH compliance</h3></div></div>
+      {message && <p className="inline-message" role="status">{message}</p>}
+      <form className="workflow-form" onSubmit={(event) => acknowledge(event).catch((error) => setMessage(error.message))}><label>Policy version<input value={policyVersion} onChange={(event) => setPolicyVersion(event.target.value)} required /></label><button className="secondary-btn" type="submit">Acknowledge policy</button></form>
+      <form className="workflow-form" onSubmit={(event) => submitComplaint(event).catch((error) => setMessage(error.message))}><label>Incident date<input type="date" value={incidentDate} onChange={(event) => setIncidentDate(event.target.value)} required /></label><label>Respondent name, if known<input value={respondent} onChange={(event) => setRespondent(event.target.value)} /></label><label>Complaint<textarea rows={3} value={complaint} onChange={(event) => setComplaint(event.target.value)} required /></label><button className="primary-btn" type="submit">Submit confidential complaint</button></form>
+      {restrictedAccess && <p className="muted">Restricted cases are visible only to the organization administrator and active POSH committee members.</p>}
+      {isAdmin && <form className="workflow-form" onSubmit={(event) => addCommitteeMember(event).catch((error) => setMessage(error.message))}><label>Committee member<select value={committeeId} onChange={(event) => setCommitteeId(event.target.value)}>{employees.map((item) => <option key={item.id} value={item.email}>{item.first_name} {item.last_name}</option>)}</select></label><button className="secondary-btn" type="submit">Add committee member</button></form>}
+      <div className="table-scroll"><table className="table"><thead><tr><th>Case</th><th>Incident date</th><th>Status</th>{!restrictedAccess && <th>Action</th>}</tr></thead><tbody>{poshItems.map((item) => <tr key={item.id}><td>Restricted case</td><td>{item.incident_date}</td><td>{item.status}</td>{!restrictedAccess && <td><select value={item.status} onChange={(event) => updateCase(item.id, event.target.value).catch((error) => setMessage(error.message))}><option value="submitted">Submitted</option><option value="under_review">Under review</option><option value="referred">Referred</option><option value="resolved">Resolved</option><option value="closed">Closed</option></select></td>}</tr>)}</tbody></table></div>
+    </section>
+    <section className="panel"><div className="panel-header"><div><p className="eyebrow">Personal data controls</p><h3>Consent and data requests</h3></div></div>
+      <form className="workflow-form" onSubmit={(event) => recordConsent(event).catch((error) => setMessage(error.message))}><label>Processing purpose<input value={purpose} onChange={(event) => setPurpose(event.target.value)} required /></label><button className="secondary-btn" type="submit">Record consent</button></form>
+      <form className="workflow-form" onSubmit={(event) => submitPrivacyRequest(event).catch((error) => setMessage(error.message))}><label>Request type<select value={requestType} onChange={(event) => setRequestType(event.target.value)}><option value="access">Access</option><option value="correction">Correction</option><option value="deletion">Deletion</option><option value="export">Export</option></select></label><label>Details<input value={requestDescription} onChange={(event) => setRequestDescription(event.target.value)} required /></label><button className="primary-btn" type="submit">Submit privacy request</button></form>
+      <div className="table-scroll"><table className="table"><thead><tr><th>Privacy request</th><th>Status</th>{isAdmin && <th>Process</th>}</tr></thead><tbody>{requests.map((item) => <tr key={item.id}><td>{item.request_type} · {item.description}</td><td>{item.status}</td>{isAdmin && <td>{item.status === 'submitted' && <div className="row-actions"><button className="text-btn" type="button" onClick={() => decidePrivacyRequest(item, 'completed').catch((error) => setMessage(error.message))}>Complete</button><button className="text-btn danger" type="button" onClick={() => decidePrivacyRequest(item, 'rejected').catch((error) => setMessage(error.message))}>Reject</button></div>}</td>}</tr>)}</tbody></table></div>
+      <p className="muted">Recorded consent entries: {consents.length}</p>
+    </section>
+  </div>
+}
+
+function AnalyticsPage() {
+  const [data, setData] = useState<Record<string, unknown> | null>(null)
+  const [message, setMessage] = useState('')
+  useEffect(() => {
+    apiFetch<Record<string, unknown>>('/analytics/dashboard')
+      .then(setData)
+      .catch((error) => setMessage(error.message))
+  }, [])
+
+  const renderValue = (key: string, value: unknown) => {
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      return <section className="panel analytics-section" key={key}><div className="panel-header"><h3>{key.replaceAll('_', ' ')}</h3></div><dl className="analytics-values">{Object.entries(value as Record<string, unknown>).map(([childKey, childValue]) => <div key={childKey}><dt>{childKey.replaceAll('_', ' ')}</dt><dd>{typeof childValue === 'object' ? JSON.stringify(childValue) : String(childValue)}</dd></div>)}</dl></section>
+    }
+    return <div className="stat-card green" key={key}><span>{key.replaceAll('_', ' ')}</span><strong>{String(value)}</strong></div>
+  }
+
+  return <div className="module-stack">
+    <section className="panel"><div className="panel-header"><div><p className="eyebrow">Role-scoped metrics</p><h3>HR analytics</h3></div></div>
+      {message && <p className="error-box" role="alert">{message}</p>}
+      {data && <><div className="page-grid analytics-summary">{Object.entries(data).filter(([, value]) => value === null || ['string', 'number', 'boolean'].includes(typeof value)).map(([key, value]) => renderValue(key, value))}</div><div className="analytics-sections">{Object.entries(data).filter(([, value]) => value && typeof value === 'object' && !Array.isArray(value)).map(([key, value]) => renderValue(key, value))}</div></>}
+      {!data && !message && <p className="muted">Loading role analytics…</p>}
+    </section>
+  </div>
+}
+
+interface EmployeeProfile {
+  email: string
+  first_name: string
+  last_name: string
+  role: Role
+  phone?: string | null
+  address?: string | null
+  emergency_contact_name?: string | null
+  emergency_contact_phone?: string | null
+  employee?: { employee_code?: string; department?: string; designation?: string; status?: string }
+}
+
+function ProfilePage() {
+  const [profile, setProfile] = useState<EmployeeProfile | null>(null)
+  const [message, setMessage] = useState('')
+  const load = async () => setProfile(await apiFetch<EmployeeProfile>('/self-service/profile'))
+  useEffect(() => { load().catch((error) => setMessage(error.message)) }, [])
+
+  const save = async (event: FormEvent) => {
+    event.preventDefault()
+    if (!profile) return
+    const updated = await apiFetch<EmployeeProfile>('/self-service/profile', {
+      method: 'PATCH',
+      body: JSON.stringify({
+        first_name: profile.first_name,
+        last_name: profile.last_name,
+        phone: profile.phone,
+        address: profile.address,
+        emergency_contact_name: profile.emergency_contact_name,
+        emergency_contact_phone: profile.emergency_contact_phone,
+      }),
+    })
+    setProfile(updated)
+    setMessage('Profile saved')
+  }
+
+  if (!profile) return <section className="panel">{message || 'Loading profile…'}</section>
+  return <section className="panel"><div className="panel-header"><div><p className="eyebrow">Employee self-service</p><h3>My Profile</h3></div></div>{message && <p className="inline-message" role="status">{message}</p>}
+    <form className="workflow-form" onSubmit={(event) => save(event).catch((error) => setMessage(error.message))}>
+      <label>First name<input value={profile.first_name} onChange={(event) => setProfile({ ...profile, first_name: event.target.value })} required /></label>
+      <label>Last name<input value={profile.last_name} onChange={(event) => setProfile({ ...profile, last_name: event.target.value })} required /></label>
+      <label>Email<input value={profile.email} disabled /></label>
+      <label>Phone<input value={profile.phone || ''} onChange={(event) => setProfile({ ...profile, phone: event.target.value })} /></label>
+      <label>Address<input value={profile.address || ''} onChange={(event) => setProfile({ ...profile, address: event.target.value })} /></label>
+      <label>Emergency contact<input value={profile.emergency_contact_name || ''} onChange={(event) => setProfile({ ...profile, emergency_contact_name: event.target.value })} /></label>
+      <label>Emergency contact phone<input value={profile.emergency_contact_phone || ''} onChange={(event) => setProfile({ ...profile, emergency_contact_phone: event.target.value })} /></label>
+      <button className="primary-btn" type="submit">Save profile</button>
+    </form>
+    <dl className="analytics-values">{Object.entries(profile.employee || {}).map(([key, value]) => <div key={key}><dt>{key.replaceAll('_', ' ')}</dt><dd>{String(value || '—')}</dd></div>)}</dl>
+  </section>
 }
 
 function StatCard({ title, value, tone }: { title: string; value: string; tone: 'blue' | 'green' | 'amber' | 'violet' }) {

@@ -7,6 +7,7 @@ from app.database import get_store
 from app.dependencies.auth import get_current_user, require_roles
 from app.services.holiday_service import get_applicable_holidays
 from app.services.policy_service import get_applicable_policies
+from app.services.team_service import get_team_user_ids
 
 router = APIRouter()
 store = get_store()
@@ -23,8 +24,10 @@ def _org_id(user: Dict[str, Any]) -> str:
 def _records(module: str, user: Dict[str, Any]) -> List[Dict[str, Any]]:
     org_id = _org_id(user)
     items = store.list_module_records(module, org_id)
-    if user.get("role") not in MANAGER_ROLES:
-        items = [item for item in items if item.get("user_id", item.get("owner_user_id", item.get("employee_user_id"))) == user["id"]]
+    if user.get("role") in HR_ROLES:
+        return items
+    visible_ids = get_team_user_ids(user) if user.get("role") == "manager" else {user["id"]}
+    items = [item for item in items if item.get("user_id", item.get("owner_user_id", item.get("employee_user_id"))) in visible_ids]
     return items
 
 
@@ -75,6 +78,8 @@ def _answer(query: str, user: Dict[str, Any]) -> Dict[str, Any]:
         return {"summary": summary, "sources": [{"module": "expenses", "record_count": len(items)}], "actions": actions}
 
     if "payslip" in text or "payroll" in text or "salary" in text:
+        if user.get("role") == "manager":
+            return {"summary": "Individual payroll information is restricted to the employee and authorized HR/Admin users.", "sources": [], "actions": []}
         items = _records("payslips", user)
         available = [item for item in items if item.get("status") == "available"]
         available.sort(key=lambda item: item.get("period_end", ""), reverse=True)
@@ -147,10 +152,12 @@ def natural_language_search(payload: Dict[str, Any], current_user: Dict[str, Any
         items = [item for item in store.list_module_records("onboarding_tasks", org_id) if item.get("status") != "completed" and item.get("due_date", "") < date.today().isoformat()]
         return {"count": len(items), "results": items, "source": "onboarding_tasks"}
     if "regularization" in query or "regularisation" in query:
-        if current_user.get("role") not in MANAGER_ROLES:
-            items = [item for item in store.list_module_records("attendance_regularization_requests", org_id) if item.get("user_id") == current_user["id"]]
+        items = store.list_module_records("attendance_regularization_requests", org_id)
+        if current_user.get("role") in HR_ROLES:
+            pass
         else:
-            items = store.list_module_records("attendance_regularization_requests", org_id)
+            visible_ids = get_team_user_ids(current_user) if current_user.get("role") == "manager" else {current_user["id"]}
+            items = [item for item in items if item.get("user_id") in visible_ids]
         pending = [item for item in items if item.get("status") == "pending"]
         return {"count": len(pending), "results": pending, "source": "attendance_regularization_requests"}
     if "document" in query:

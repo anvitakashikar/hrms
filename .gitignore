@@ -6,6 +6,8 @@ __pycache__/
 .venv/
 venv/
 .pytest_cache/
+backend/data/
+backend/private_uploads/
 
 # Node
 node_modules/

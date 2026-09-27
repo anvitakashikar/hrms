@@ -1,15 +1,24 @@
+import re
+import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import FileResponse
 
 from app.database import get_store
 from app.dependencies.auth import get_current_user, require_roles
+from app.services.document_extraction import extract_text
+from app.services.notification_service import notify_user
 
 router = APIRouter()
 store = get_store()
 RECRUITERS = ("admin", "hr", "manager")
 HR_ROLES = ("admin", "hr")
+UPLOAD_ROOT = Path(__file__).resolve().parents[2] / "private_uploads"
+MAX_RESUME_BYTES = 10 * 1024 * 1024
+COMMON_SKILLS = ("python", "sql", "excel", "leadership", "communication", "project management", "react", "typescript", "javascript", "fastapi", "aws", "azure", "power bi", "tableau", "recruiting", "payroll", "analytics", "machine learning", "testing", "java", "go", "docker", "kubernetes", "mongodb", "postgresql")
 
 
 def _org_id(user: Dict[str, Any]) -> str:
@@ -23,6 +32,145 @@ def _record(module: str, record_id: str, org_id: str, label: str) -> Dict[str, A
     if record is None:
         raise HTTPException(status_code=404, detail=f"{label} not found")
     return record
+
+
+def _extract_candidate_fields(text: str) -> Dict[str, Any]:
+    emails = re.findall(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", text, flags=re.IGNORECASE)
+    phones = re.findall(r"(?:\+?\d[\d .()-]{7,}\d)", text)
+    skills = [skill for skill in COMMON_SKILLS if re.search(r"\b" + re.escape(skill) + r"\b", text, flags=re.IGNORECASE)]
+    experience = re.search(r"(\d{1,2})\+?\s+years?\s+(?:of\s+)?experience", text, flags=re.IGNORECASE)
+    first_line = next((line.strip() for line in text.splitlines() if line.strip()), "")
+    return {
+        "candidate_name_suggestion": first_line[:120],
+        "email_suggestion": emails[0] if emails else None,
+        "phone_suggestion": phones[0].strip() if phones else None,
+        "skills": skills,
+        "experience_years": int(experience.group(1)) if experience else None,
+        "qualifications": [line.strip() for line in text.splitlines() if any(term in line.casefold() for term in ("bachelor", "master", "degree", "ph.d", "diploma"))][:10],
+    }
+
+
+@router.post("/applicants/{application_id}/resume", status_code=status.HTTP_201_CREATED)
+async def upload_candidate_resume(application_id: str, request: Request, current_user: Dict[str, Any] = Depends(require_roles(*RECRUITERS))) -> Dict[str, Any]:
+    org_id = _org_id(current_user)
+    application = _record("candidate_applications", application_id, org_id, "Candidate application")
+    form = await request.form()
+    file = form.get("file")
+    if not file or not getattr(file, "filename", None):
+        raise HTTPException(status_code=422, detail="Resume file is required")
+    extension = Path(file.filename).suffix.lower()
+    if extension not in {".pdf", ".docx", ".txt"}:
+        raise HTTPException(status_code=415, detail="Resume must be PDF, DOCX, or TXT")
+    content = await file.read(MAX_RESUME_BYTES + 1)
+    if not content or len(content) > MAX_RESUME_BYTES:
+        raise HTTPException(status_code=413, detail="Resume must be non-empty and 10 MB or smaller")
+    extracted_text = extract_text(content, file.filename, file.content_type or "")
+    candidate_id = application["candidate_id"]
+    candidate = _record("candidates", candidate_id, org_id, "Candidate")
+    resume_id = str(uuid.uuid4())
+    directory = UPLOAD_ROOT / org_id / "resumes"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{resume_id}{extension}"
+    path.write_bytes(content)
+    extracted = _extract_candidate_fields(extracted_text)
+    resume = store.create_module_record("candidate_resumes", {
+        "id": resume_id,
+        "org_id": org_id,
+        "candidate_id": candidate_id,
+        "application_id": application_id,
+        "file_name": Path(file.filename).name,
+        "content_type": file.content_type or "application/octet-stream",
+        "storage_path": str(path),
+        "extracted_text": extracted_text[:50000],
+        "extracted_fields": extracted,
+        "review_status": "needs_review",
+        "uploaded_by": current_user["id"],
+    })
+    store.update_module_record("candidates", candidate_id, org_id, {
+        "resume_id": resume_id,
+        "resume_extracted_fields": extracted,
+    })
+    store.add_audit_log(current_user["id"], org_id, "recruitment.resume.extracted", {"record_id": resume_id, "candidate_id": candidate_id})
+    return {key: value for key, value in resume.items() if key not in {"storage_path", "extracted_text"}}
+
+
+@router.get("/applicants/{application_id}/resume")
+def get_candidate_resume(application_id: str, current_user: Dict[str, Any] = Depends(require_roles(*RECRUITERS))) -> Dict[str, Any]:
+    org_id = _org_id(current_user)
+    _record("candidate_applications", application_id, org_id, "Candidate application")
+    resumes = [item for item in store.list_module_records("candidate_resumes", org_id) if item.get("application_id") == application_id]
+    if not resumes:
+        raise HTTPException(status_code=404, detail="Candidate resume not found")
+    item = resumes[-1]
+    return {key: value for key, value in item.items() if key not in {"storage_path", "extracted_text"}}
+
+
+@router.get("/resumes/{resume_id}/download")
+def download_candidate_resume(resume_id: str, current_user: Dict[str, Any] = Depends(require_roles(*RECRUITERS))) -> FileResponse:
+    org_id = _org_id(current_user)
+    resume = _record("candidate_resumes", resume_id, org_id, "Candidate resume")
+    path = Path(resume["storage_path"])
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Resume file is unavailable")
+    store.add_audit_log(current_user["id"], org_id, "recruitment.resume.accessed", {"record_id": resume_id})
+    return FileResponse(path, media_type=resume["content_type"], filename=resume["file_name"])
+
+
+@router.patch("/resumes/{resume_id}/confirm")
+def confirm_candidate_extraction(resume_id: str, payload: Dict[str, Any], current_user: Dict[str, Any] = Depends(require_roles(*RECRUITERS))) -> Dict[str, Any]:
+    org_id = _org_id(current_user)
+    resume = _record("candidate_resumes", resume_id, org_id, "Candidate resume")
+    if resume["review_status"] != "needs_review":
+        raise HTTPException(status_code=409, detail="Extracted resume information has already been reviewed")
+    fields = payload.get("fields", {})
+    allowed = {key: fields[key] for key in ("candidate_name_suggestion", "email_suggestion", "phone_suggestion", "skills", "qualifications", "experience_years") if key in fields}
+    candidate = store.get_module_record("candidates", resume["candidate_id"], org_id)
+    if candidate is None:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+    updates = {
+        "name": allowed.get("candidate_name_suggestion", candidate.get("name", candidate.get("candidate_name"))),
+        "email": allowed.get("email_suggestion", candidate["email"]),
+        "phone": allowed.get("phone_suggestion", candidate.get("phone")),
+        "skills": allowed.get("skills", candidate.get("skills", [])),
+        "qualifications": allowed.get("qualifications", candidate.get("qualifications", [])),
+        "experience_years": allowed.get("experience_years", candidate.get("experience_years")),
+    }
+    store.update_module_record("candidates", candidate["id"], org_id, updates)
+    store.update_module_record("candidate_applications", resume["application_id"], org_id, {
+        "candidate_name": updates["name"],
+        "email": updates["email"],
+    })
+    updated = store.update_module_record("candidate_resumes", resume_id, org_id, {
+        "extracted_fields": allowed,
+        "review_status": "confirmed",
+        "reviewed_by": current_user["id"],
+        "reviewed_at": datetime.now(timezone.utc).isoformat(),
+    })
+    store.add_audit_log(current_user["id"], org_id, "recruitment.resume.extraction_confirmed", {"record_id": resume_id, "candidate_id": candidate["id"]})
+    return {key: value for key, value in updated.items() if key not in {"storage_path", "extracted_text"}}
+
+
+@router.get("/matching/{job_id}")
+def match_candidates_to_job(job_id: str, current_user: Dict[str, Any] = Depends(require_roles(*RECRUITERS))) -> List[Dict[str, Any]]:
+    org_id = _org_id(current_user)
+    job = _record("job_postings", job_id, org_id, "Job posting")
+    requirements = job.get("requirements", [])
+    if isinstance(requirements, str):
+        requirements = requirements.split()
+    requirement_terms = {str(term).casefold().strip() for term in requirements if str(term).strip()}
+    description_terms = set(re.findall(r"[a-z0-9+#.]+", str(job.get("description", "")).casefold()))
+    requirement_terms.update(description_terms)
+    applications = [item for item in store.list_module_records("candidate_applications", org_id) if item.get("job_id") == job_id]
+    results = []
+    for application in applications:
+        candidate = store.get_module_record("candidates", application["candidate_id"], org_id) or {}
+        resume = store.get_module_record("candidate_resumes", candidate.get("resume_id", ""), org_id) or {}
+        skills = {str(item).casefold() for item in candidate.get("skills", [])}
+        resume_text = str(resume.get("extracted_text", "")).casefold()
+        matched = sorted(term for term in requirement_terms if term in skills or term in resume_text)
+        score = round(100 * len(matched) / max(len(requirement_terms), 1), 1)
+        results.append({"application_id": application["id"], "candidate_name": application["candidate_name"], "score": score, "matched_terms": matched, "decision_support_only": True})
+    return sorted(results, key=lambda item: item["score"], reverse=True)
 
 
 @router.post("/requisitions", status_code=status.HTTP_201_CREATED)
@@ -154,6 +302,9 @@ def create_applicant(payload: Dict[str, Any], current_user: Dict[str, Any] = Dep
     })
     application["candidate"] = candidate
     store.add_audit_log(current_user["id"], org_id, "recruitment.candidate.applied", {"record_id": application["id"], "job_id": job["id"]})
+    for reviewer in store.users.values():
+        if reviewer.get("org_id") == org_id and reviewer.get("role") in HR_ROLES:
+            notify_user(org_id, reviewer["id"], "recruitment.candidate.applied", "Candidate added", f"{name} applied for {job['title']}.", "candidate_application", application["id"])
     return application
 
 

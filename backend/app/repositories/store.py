@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import copy
+import json
+import os
+import sqlite3
+import threading
 import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
 class InMemoryStore:
-    def __init__(self) -> None:
+    def __init__(self, database_path: Optional[str] = None) -> None:
         self.organizations: Dict[str, Dict[str, Any]] = {}
         self.users: Dict[str, Dict[str, Any]] = {}
         self.employees: Dict[str, Dict[str, Any]] = {}
@@ -16,6 +21,59 @@ class InMemoryStore:
         self.attendance_records: Dict[str, Dict[str, Any]] = {}
         self.audit_logs: List[Dict[str, Any]] = []
         self.module_records: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        configured_path = database_path or os.environ.get("HRMS_DB_PATH")
+        if configured_path is None:
+            configured_path = str(Path(__file__).resolve().parents[2] / "data" / "hrms.sqlite3")
+        if configured_path != ":memory:":
+            Path(configured_path).parent.mkdir(parents=True, exist_ok=True)
+        self.database_path = configured_path
+        self._lock = threading.RLock()
+        self._connection = sqlite3.connect(configured_path, check_same_thread=False, timeout=10)
+        self._connection.execute("PRAGMA busy_timeout = 10000")
+        self._connection.execute(
+            "CREATE TABLE IF NOT EXISTS hrms_records ("
+            "collection TEXT NOT NULL, record_id TEXT NOT NULL, org_id TEXT, payload TEXT NOT NULL, "
+            "PRIMARY KEY (collection, record_id))"
+        )
+        self._connection.execute("CREATE INDEX IF NOT EXISTS hrms_records_org_idx ON hrms_records (org_id, collection)")
+        self._connection.commit()
+        self._load_records()
+
+    def _load_records(self) -> None:
+        collections = {
+            "organizations": self.organizations,
+            "users": self.users,
+            "employees": self.employees,
+            "leave_applications": self.leave_applications,
+            "expense_claims": self.expense_claims,
+            "attendance_records": self.attendance_records,
+        }
+        with self._lock:
+            rows = self._connection.execute("SELECT collection, payload FROM hrms_records ORDER BY rowid").fetchall()
+        for collection, payload in rows:
+            record = json.loads(payload)
+            if collection == "audit_logs":
+                self.audit_logs.append(record)
+            elif collection.startswith("module:"):
+                module = collection.split(":", 1)[1]
+                self.module_records.setdefault(module, {})[record["id"]] = record
+            elif collection in collections:
+                collections[collection][record["id"]] = record
+
+    def _persist(self, collection: str, record: Dict[str, Any]) -> None:
+        payload = json.dumps(record, separators=(",", ":"), default=str)
+        with self._lock:
+            self._connection.execute(
+                "INSERT INTO hrms_records (collection, record_id, org_id, payload) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(collection, record_id) DO UPDATE SET org_id = excluded.org_id, payload = excluded.payload",
+                (collection, record["id"], record.get("org_id"), payload),
+            )
+            self._connection.commit()
+
+    def _delete_persisted(self, collection: str, record_id: str) -> None:
+        with self._lock:
+            self._connection.execute("DELETE FROM hrms_records WHERE collection = ? AND record_id = ?", (collection, record_id))
+            self._connection.commit()
 
     def create_organization(self, org_name: str, org_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         org_name = org_name or (org_data or {}).get("name")
@@ -46,6 +104,7 @@ class InMemoryStore:
             "is_active": True,
         }
         self.organizations[org_id] = entity
+        self._persist("organizations", entity)
         return copy.deepcopy(entity)
 
     def create_user(self, user_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -62,6 +121,7 @@ class InMemoryStore:
             "created_at": datetime.utcnow().isoformat(),
         }
         self.users[user_id] = entity
+        self._persist("users", entity)
         return copy.deepcopy(entity)
 
     def get_user_by_email(self, email: str) -> Optional[Dict[str, Any]]:
@@ -79,6 +139,7 @@ class InMemoryStore:
         if user is None:
             raise KeyError(f"User {user_id} not found")
         user.update(updates)
+        self._persist("users", user)
         return copy.deepcopy(user)
 
     def get_organization_by_id(self, org_id: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -107,6 +168,7 @@ class InMemoryStore:
             "created_at": datetime.utcnow().isoformat(),
         }
         self.employees[emp_id] = entity
+        self._persist("employees", entity)
         return copy.deepcopy(entity)
 
     def get_employee_by_user_email(self, org_id: str, email: str) -> Optional[Dict[str, Any]]:
@@ -114,6 +176,15 @@ class InMemoryStore:
             if employee.get("org_id") == org_id and employee.get("email") == email.lower():
                 return copy.deepcopy(employee)
         return None
+
+    def update_employee(self, employee_id: str, org_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        employee = self.employees.get(employee_id)
+        if employee is None or employee.get("org_id") != org_id:
+            return None
+        employee.update(copy.deepcopy(updates))
+        employee["updated_at"] = datetime.utcnow().isoformat()
+        self._persist("employees", employee)
+        return copy.deepcopy(employee)
 
     def create_leave_application(self, data: Dict[str, Any]) -> Dict[str, Any]:
         app_id = str(uuid.uuid4())
@@ -129,6 +200,7 @@ class InMemoryStore:
             "created_at": datetime.utcnow().isoformat(),
         }
         self.leave_applications[app_id] = entity
+        self._persist("leave_applications", entity)
         return copy.deepcopy(entity)
 
     def get_leave_application(self, application_id: str) -> Optional[Dict[str, Any]]:
@@ -138,6 +210,7 @@ class InMemoryStore:
     def update_leave_application(self, application_id: str, updates: Dict[str, Any]) -> Dict[str, Any]:
         app = self.leave_applications[application_id]
         app.update(updates)
+        self._persist("leave_applications", app)
         return copy.deepcopy(app)
 
     def list_leave_applications(self, org_id: str) -> List[Dict[str, Any]]:
@@ -158,6 +231,7 @@ class InMemoryStore:
             "created_at": datetime.utcnow().isoformat(),
         }
         self.expense_claims[claim_id] = entity
+        self._persist("expense_claims", entity)
         return copy.deepcopy(entity)
 
     def list_expense_claims(self, org_id: str) -> List[Dict[str, Any]]:
@@ -173,6 +247,7 @@ class InMemoryStore:
             "created_at": datetime.utcnow().isoformat(),
         }
         self.audit_logs.append(item)
+        self._persist("audit_logs", item)
         return copy.deepcopy(item)
 
     def create_module_record(self, module: str, data: Dict[str, Any]) -> Dict[str, Any]:
@@ -181,6 +256,7 @@ class InMemoryStore:
         item.setdefault("id", str(uuid.uuid4()))
         item.setdefault("created_at", datetime.utcnow().isoformat())
         records[item["id"]] = item
+        self._persist(f"module:{module}", item)
         return copy.deepcopy(item)
 
     def list_module_records(self, module: str, org_id: str) -> List[Dict[str, Any]]:
@@ -200,6 +276,7 @@ class InMemoryStore:
             return None
         item.update(copy.deepcopy(updates))
         item["updated_at"] = datetime.utcnow().isoformat()
+        self._persist(f"module:{module}", item)
         return copy.deepcopy(item)
 
     def delete_module_record(self, module: str, record_id: str, org_id: str) -> bool:
@@ -208,4 +285,5 @@ class InMemoryStore:
         if item is None or item.get("org_id") != org_id:
             return False
         del records[record_id]
+        self._delete_persisted(f"module:{module}", record_id)
         return True

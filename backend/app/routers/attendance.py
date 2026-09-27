@@ -6,7 +6,9 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 
 from app.database import get_store
 from app.dependencies.auth import get_current_user, require_roles
+from app.services.notification_service import notify_reviewers
 from app.services.policy_service import get_policy_value
+from app.services.team_service import get_team_user_ids
 
 router = APIRouter()
 store = get_store()
@@ -22,8 +24,11 @@ def _org_id(user: Dict[str, Any]) -> str:
 
 def _visible_records(user: Dict[str, Any]) -> List[Dict[str, Any]]:
     records = store.list_module_records("attendance_records", _org_id(user))
-    if user.get("role") in HR_ROLES or user.get("role") == "manager":
+    if user.get("role") in HR_ROLES:
         return records
+    if user.get("role") == "manager":
+        team_ids = get_team_user_ids(user)
+        return [item for item in records if item.get("user_id") in team_ids]
     return [item for item in records if item.get("user_id") == user["id"]]
 
 
@@ -181,6 +186,25 @@ def create_geo_fence(payload: Dict[str, Any], current_user: Dict[str, Any] = Dep
     })
 
 
+@router.get("/geo-fences")
+def list_geo_fences(current_user: Dict[str, Any] = Depends(require_roles(*HR_ROLES))) -> List[Dict[str, Any]]:
+    return store.list_module_records("geo_fence_zones", _org_id(current_user))
+
+
+@router.get("/location-reports")
+def location_report(current_user: Dict[str, Any] = Depends(require_roles(*HR_ROLES))) -> Dict[str, Any]:
+    org_id = _org_id(current_user)
+    pings = store.list_module_records("location_ping_logs", org_id)
+    violations = store.list_module_records("geo_fence_violations", org_id)
+    return {
+        "ping_count": len(pings),
+        "employee_count": len({item.get("user_id") for item in pings}),
+        "violation_count": len(violations),
+        "retention_purposes": sorted({item.get("retention_purpose", "attendance_event") for item in pings}),
+        "violations": violations,
+    }
+
+
 @router.post("/check-in", status_code=status.HTTP_200_OK)
 def check_in(
     payload: Dict[str, Any] = Body(default={}),
@@ -252,6 +276,17 @@ def check_out(
         "status": "half_day" if working_minutes < 240 else ("late" if open_record["late_minutes"] else "present"),
         "check_out_location_event": location,
     })
+    if overtime > 0:
+        overtime_record = store.create_module_record("overtime_records", {
+            "org_id": org_id,
+            "user_id": current_user["id"],
+            "attendance_record_id": updated["id"],
+            "work_date": updated["work_date"],
+            "minutes": overtime,
+            "status": "pending_approval",
+            "source": "attendance_check_out",
+        })
+        notify_reviewers(org_id, "overtime.recorded", "Overtime awaiting review", f"{current_user['first_name']} recorded {overtime} overtime minutes.", "overtime_record", overtime_record["id"])
     store.add_audit_log(current_user["id"], org_id, "attendance.checked_out", {"record_id": updated["id"]})
     return updated
 
@@ -304,7 +339,10 @@ def create_regularization_request(payload: Dict[str, Any], current_user: Dict[st
 @router.get("/regularization-requests")
 def list_regularization_requests(current_user: Dict[str, Any] = Depends(get_current_user)) -> List[Dict[str, Any]]:
     items = store.list_module_records("attendance_regularization_requests", _org_id(current_user))
-    if current_user.get("role") not in REVIEW_ROLES:
+    if current_user.get("role") == "manager":
+        team_ids = get_team_user_ids(current_user)
+        items = [item for item in items if item.get("user_id") in team_ids]
+    elif current_user.get("role") not in REVIEW_ROLES:
         items = [item for item in items if item.get("user_id") == current_user["id"]]
     return items
 
@@ -321,6 +359,8 @@ def decide_regularization_request(
         raise HTTPException(status_code=422, detail="Status must be approved or rejected")
     item = store.get_module_record("attendance_regularization_requests", request_id, org_id)
     if item is None:
+        raise HTTPException(status_code=404, detail="Regularization request not found")
+    if current_user.get("role") == "manager" and item.get("user_id") not in get_team_user_ids(current_user):
         raise HTTPException(status_code=404, detail="Regularization request not found")
     if item["status"] != "pending":
         raise HTTPException(status_code=409, detail="Request has already been reviewed")
@@ -363,8 +403,9 @@ def location_history(
 ) -> List[Dict[str, Any]]:
     org_id = _org_id(current_user)
     target_id = user_id or current_user["id"]
-    if target_id != current_user["id"] and current_user.get("role") not in HR_ROLES:
-        raise HTTPException(status_code=403, detail="Location history is restricted to the employee and HR/Admin")
+    permitted_ids = get_team_user_ids(current_user) if current_user.get("role") == "manager" else {current_user["id"]}
+    if target_id != current_user["id"] and current_user.get("role") not in HR_ROLES and target_id not in permitted_ids:
+        raise HTTPException(status_code=403, detail="Location history is restricted to the employee, their manager, and HR/Admin")
     return [item for item in store.list_module_records("location_ping_logs", org_id) if item.get("user_id") == target_id]
 
 

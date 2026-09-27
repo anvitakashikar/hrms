@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from app.database import get_store
 from app.dependencies.auth import get_current_user, require_roles
 from app.services.notification_service import notify_user
+from app.services.team_service import get_team_user_ids
 
 router = APIRouter()
 store = get_store()
@@ -105,6 +106,8 @@ def create_onboarding_task(
     if not title:
         raise HTTPException(status_code=422, detail="Task title is required")
     assignee = _assignee_user(payload.get("assignee_user_id") or payload.get("assignee"), org_id)
+    if current_user.get("role") == "manager" and assignee["id"] not in get_team_user_ids(current_user):
+        raise HTTPException(status_code=403, detail="Managers may assign tasks only to their team")
     due_date = payload.get("due_date")
     try:
         due_date = date.fromisoformat(due_date).isoformat()
@@ -130,7 +133,10 @@ def list_onboarding_tasks(current_user: Dict[str, Any] = Depends(get_current_use
     if not current_user.get("org_id"):
         return []
     items = store.list_module_records("onboarding_tasks", current_user["org_id"])
-    if current_user.get("role") not in MANAGERS:
+    if current_user.get("role") == "manager":
+        team_ids = get_team_user_ids(current_user)
+        items = [item for item in items if item.get("employee_user_id") in team_ids or item.get("assignee_user_id") in team_ids]
+    elif current_user.get("role") not in MANAGERS:
         items = [item for item in items if item.get("employee_user_id") == current_user["id"] or item.get("assignee_user_id") == current_user["id"]]
     return items
 
@@ -150,7 +156,8 @@ def update_onboarding_task(
     if status_value not in allowed_statuses:
         raise HTTPException(status_code=422, detail="Unsupported onboarding task status")
     is_assignee = task.get("employee_user_id") == current_user["id"] or task.get("assignee_user_id") == current_user["id"]
-    if not is_assignee and current_user.get("role") not in MANAGERS:
+    manager_can_update = current_user.get("role") == "manager" and task.get("employee_user_id") in get_team_user_ids(current_user)
+    if not is_assignee and current_user.get("role") not in HR_ROLES and not manager_can_update:
         raise HTTPException(status_code=403, detail="Only the assignee or HR can update this task")
     updates = {"status": status_value, "updated_by": current_user["id"]}
     if status_value == "completed":
@@ -168,16 +175,19 @@ def onboarding_dashboard(current_user: Dict[str, Any] = Depends(require_roles(*H
     today = date.today().isoformat()
     pending_tasks = [item for item in tasks if item.get("status") != "completed"]
     onboarding_users = {item.get("employee_user_id") for item in pending_tasks}
+    required_categories = [item for item in store.list_module_records("document_categories", org_id) if item.get("active") and item.get("required")]
+    employees = [user for user in store.users.values() if user.get("org_id") == org_id and user.get("role") != "admin"]
+    missing_documents = sum(
+        1 for employee in employees for category in required_categories
+        if not any(doc.get("owner_user_id") == employee["id"] and doc.get("category_id") == category["id"] and doc.get("status") == "approved" for doc in documents)
+    )
     return {
         "employees_onboarding": len(onboarding_users),
         "completed_tasks": sum(1 for item in tasks if item.get("status") == "completed"),
         "pending_tasks": len(pending_tasks),
         "overdue_tasks": sum(1 for item in pending_tasks if item.get("due_date", "") < today),
         "documents_pending_verification": sum(1 for item in documents if item.get("status") == "pending_verification"),
-        "missing_required_documents": len([
-            category for category in store.list_module_records("document_categories", org_id)
-            if category.get("active") and category.get("required")
-        ]) - sum(1 for item in documents if item.get("status") == "approved"),
+        "missing_required_documents": missing_documents,
         "tasks": tasks,
     }
 

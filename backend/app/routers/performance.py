@@ -168,6 +168,7 @@ def create_review(payload: Dict[str, Any], current_user: Dict[str, Any] = Depend
             "reviewer_user_id": current_user["id"],
             "feedback": notes,
         })
+        notify_user(org_id, employee_user_id, "performance.review.submitted", "Performance review available", "A manager review was submitted for your review cycle.", "performance_review", review["id"])
     store.add_audit_log(current_user["id"], org_id, "performance.review.submitted", {"record_id": review["id"], "review_type": review_type})
     return review
 
